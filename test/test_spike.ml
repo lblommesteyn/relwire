@@ -211,5 +211,39 @@ let () =
   check "no violations, all finished"
     (List.for_all (fun x -> clean x && outcomes x Arbitration_lost = [] && done_ x) [ sc; st; so ]);
 
+  print_endline "12. Manchester: per-bit resync";
+  let word = "10110010011100001111010100110101" in
+  let m = Manchester.frame 32 in
+  let man_run ?(clock = 1.0) ?(mutate_tr = fun t -> t) () =
+    let tx = make_agent ~name:"MTX" m (Run_as [ "tx" ]) ~inputs:[ ("data", bits word) ] in
+    let rx = make_agent ~clock ~name:"MRX" m Observe_all ~inputs:[] in
+    let tr = simulate ~wires:Manchester.wires ~agents:[ tx ] ~ticks:3600 () in
+    ignore (simulate ~wires:Manchester.wires ~agents:[ rx ]
+              ~raw:[ replay (mutate_tr tr) Manchester.wires ] ~ticks:3600 ());
+    (tx, rx)
+  in
+  let mtx, mrx = man_run () in
+  check "32-bit frame decodes" (field_value mrx "data" = word && done_ mrx && done_ mtx);
+  check "receiver clock off by 8% and 15% still decodes 32 bits"
+    (List.for_all
+       (fun c -> let _, r = man_run ~clock:c () in
+         field_value r "data" = word && outcomes r Deadline_missed = [])
+       [ 0.85; 0.92; 1.08; 1.15 ]);
+  let _, r40 = man_run ~clock:1.4 () in
+  check "receiver clock off by 40% fails visibly"
+    (field_value r40 "data" <> word || not (clean r40) || not (done_ r40));
+  (* A 3-tick glitch inside a blanking window is ignored. *)
+  let glitch tr =
+    let t0 = 10 + 1 + 50 + 1 + (5 * 100) + 50 + 10 in
+    List.map
+      (fun (t, vs) ->
+        if t >= t0 && t < t0 + 3 then
+          (t, [ ("LINE", if List.assoc "LINE" vs = L0 then L1 else L0) ])
+        else (t, vs))
+      tr
+  in
+  let _, rg = man_run ~mutate_tr:glitch () in
+  check "glitch inside the blanking window is ignored" (field_value rg "data" = word);
+
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

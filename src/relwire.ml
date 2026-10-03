@@ -72,6 +72,13 @@ type stmt =
   (* A time point fixed by the agreed rate, not by any wire: [ticks] after
      the previous anchor. Every agent places it with its own timer. *)
   | After of { time : string; ticks : int }
+  (* Put the complement of a field bit: the level before a data edge. *)
+  | Put_not of { wire : string; field : string; idx : index }
+  (* An edge whose new level IS the data. Its owner drives it at [nominal];
+     an observer accepts any transition in [min_after, max_after] (earlier
+     ones are blanked), binds the bit to the new level, and re-anchors. *)
+  | Toggle of { wire : string; field : string; idx : index; time : string;
+                nominal : int; min_after : int; max_after : int }
 
 type program = {
   wires : wire_spec list;
@@ -88,9 +95,11 @@ type own = Supplied | Observed
 type instr =
   | IEdge of { wire : string; level : level; time : string; role : role;
                own : own; min_after : int; max_after : int }
-  | IPut of { wire : string; field : string; bit : int; role : role; own : own }
+  | IPut of { wire : string; field : string; bit : int; role : role; own : own; inv : bool }
   | ISample of { wire : string; field : string; bit : int; role : role; own : own }
   | IAfter of { time : string; ticks : int }
+  | IToggle of { wire : string; field : string; bit : int; time : string; role : role;
+                 own : own; nominal : int; min_after : int; max_after : int }
 
 let owner_of prog name =
   List.find_map
@@ -120,7 +129,14 @@ let specialize prog assignment =
             [ IEdge { wire; level; time; role; own = own_of role; min_after; max_after } ]
         | Put { wire; field; idx } ->
             let role = owner_of prog field in
-            [ IPut { wire; field; bit = ix env idx; role; own = own_of role } ]
+            [ IPut { wire; field; bit = ix env idx; role; own = own_of role; inv = false } ]
+        | Put_not { wire; field; idx } ->
+            let role = owner_of prog field in
+            [ IPut { wire; field; bit = ix env idx; role; own = own_of role; inv = true } ]
+        | Toggle { wire; field; idx; time; nominal; min_after; max_after } ->
+            let role = owner_of prog field in
+            [ IToggle { wire; field; bit = ix env idx; time; role; own = own_of role;
+                        nominal; min_after; max_after } ]
         | Sample { wire; field; idx } ->
             let role = owner_of prog field in
             [ ISample { wire; field; bit = ix env idx; role; own = own_of role } ]
@@ -196,12 +212,14 @@ let step a ~tick ~now ~prev =
   let continue = ref true in
   while !continue && a.pc < Array.length a.machine do
     (match a.machine.(a.pc) with
-     | IPut { wire; field; bit; role; own } ->
+     | IPut { wire; field; bit; role; own; inv } ->
          let d =
            match effective a role own with
            | Supplied -> (
                match (Hashtbl.find a.env field).(bit) with
-               | Some lv -> drive_for (List.assoc wire a.specs) lv
+               | Some lv ->
+                   let lv = if inv then (if lv = L0 then L1 else L0) else lv in
+                   drive_for (List.assoc wire a.specs) lv
                | None -> failwith ("no input for " ^ field))
            | Observed -> HighZ
          in
@@ -229,6 +247,41 @@ let step a ~tick ~now ~prev =
            a.anchor <- tick; a.pc <- a.pc + 1
          end
          else continue := false
+     | IToggle { wire; field; bit; time; role; own; nominal; min_after; max_after } -> (
+         let nominal = scaled a nominal and min_after = scaled a min_after
+         and max_after = scaled a max_after in
+         let cell = Hashtbl.find a.env field in
+         let finish () = a.anchor <- tick; a.phase <- Ready; a.pc <- a.pc + 1 in
+         match (a.phase, effective a role own) with
+         | Ready, Supplied ->
+             if tick >= a.anchor + nominal then begin
+               Hashtbl.replace a.drives wire
+                 (drive_for (List.assoc wire a.specs) (Option.get cell.(bit)));
+               a.phase <- Driven tick
+             end;
+             continue := false
+         | Driven t0, _ when tick > t0 ->
+             (match now wire with
+              | V lv when cell.(bit) = Some lv -> log a tick Match field bit
+              | V lv ->
+                  cell.(bit) <- Some lv;
+                  log a tick Arbitration_lost field bit;
+                  a.demoted <- role :: a.demoted;
+                  release_all a
+              | _ -> log a tick Bad_wire field bit);
+             finish ()
+         | Driven _, _ -> continue := false
+         | _, Observed ->
+             let d = tick - a.anchor in
+             if d > max_after then (log a tick Deadline_missed time 0; finish ())
+             else if d >= min_after && now wire <> prev wire then begin
+               (match now wire with
+                | V lv -> cell.(bit) <- Some lv
+                | _ -> log a tick Bad_wire field bit);
+               finish ()
+             end
+             else continue := false
+         | Awaiting, Supplied -> continue := false)
      | IEdge { wire; level; time; role; own; min_after; max_after } -> (
          let min_after = scaled a min_after and max_after = scaled a max_after in
          let finish () =
@@ -367,6 +420,12 @@ let schedule prog assignment =
           ignore
             (push { label = Change wire; base = !anchor; off = { lo = 1; hi = Some 1 };
                     is_edge = false; mine = own = Supplied })
+      | IToggle { time; own; nominal; min_after; max_after; _ } ->
+          let off = match own with
+            | Supplied -> { lo = nominal + 1; hi = Some (nominal + 1) }
+            | Observed -> { lo = min_after; hi = Some max_after } in
+          anchor := push { label = At time; base = !anchor; off; is_edge = true;
+                           mine = own = Supplied }
       | IAfter { time; ticks } ->
           anchor :=
             push { label = At time; base = !anchor; off = { lo = ticks; hi = Some ticks };
