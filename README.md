@@ -47,12 +47,28 @@ bias (`pull_up`, `pull_down`, `floating`).
 
 `dune test` runs the semantic suite: I2C (arbitration, stretching, full write,
 replay and mutated replay), UART (baud tolerance), full-duplex SPI, Manchester
-(per-bit resync), the timing certificate cross-checked against simulation with
+(per-bit resync), CAN (bit stuffing as a branch on shared wire history,
+arbitration, stuff-error detection), I2C read-or-write on the R/W bit, the timing certificate cross-checked against simulation with
 and without io delays, and the `.rw` sources checked against the OCaml-built
 programs.
 
+### Hardware (ISA v0)
+
+`hw/rpm_core.v` executes a specialized instruction stream (64-bit words, encoder in
+`src/hw.ml`). `test/hw_diff.ml` runs eight scenarios (I2C arbitration, write, read
+branch, SPI, UART, Manchester, CAN stuffing, CAN arbitration) on both the reference
+model and the RTL under iverilog, and requires them to agree tick for tick on the
+bus, event for event per core, and bit for bit in data memory. A planted bug
+(stuff bit not complemented) is caught at the first stuff bit.
+
+Yosys against IHP sg13g2 (typ): **1,919 cells, 210 flops, 27,700 um2** per core
+(about one 200x150 um tile before utilization), 128 of those flops are data
+memory. Instruction memory is the real constraint: CAN is 418 instructions
+unrolled (26.8 kbit at 64 bits each), 98 with hardware loops. Next: loops,
+a narrower encoding, and SRAM for instructions.
+
 Open questions: a data override demotes the whole role while a time override
-flips only that edge; CAN needs bit stuffing (data-dependent insertion), which
-the language cannot express yet.
+flips only that edge; the certificate does not handle branching programs yet;
+CAN resync within a frame (only hard sync on SOF is modelled).
 
 Build: `dune build` (OCaml 4.14, dune 3).

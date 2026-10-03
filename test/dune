@@ -1,5 +1,15 @@
 (test
  (name test_spike)
+ (modules test_spike)
  (libraries relwire_lib)
  (deps (glob_files %{project_root}/examples/*.rw))
+ (flags (:standard -warn-error -a)))
+
+(test
+ (name hw_diff)
+ (modules hw_diff)
+ (libraries relwire_lib)
+ (deps
+  (glob_files %{project_root}/examples/*.rw)
+  (glob_files %{project_root}/hw/*.v))
  (flags (:standard -warn-error -a)))

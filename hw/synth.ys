@@ -1,0 +1,7 @@
+# Map the RPM core to IHP sg13g2 standard cells and report area.
+read_verilog -sv rpm_core.v
+synth -top rpm_core -flatten
+dfflibmap -liberty LIB
+abc -liberty LIB
+opt_clean
+stat -liberty LIB
