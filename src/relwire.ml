@@ -51,6 +51,14 @@ type index = Const of int | Loop of string
 type decl =
   | Field of { name : string; width : int; owner : role }
   | Time of { name : string; owner : role }
+  (* A fixed bit (framing, e.g. STOP's low phase). Suppliers drive it,
+     observers check it. *)
+  | Lit of { name : string; value : level; owner : role }
+
+(* Constraint endpoints: an edge (by time variable) or a Put onto a wire. *)
+type event_ref = At of string | Change of string
+
+type constr = { cname : string; from_ : event_ref; to_ : event_ref; min_ticks : int }
 
 type stmt =
   (* The edge's time is a variable: its owner binds it, everyone else
@@ -62,7 +70,12 @@ type stmt =
   | Sample of { wire : string; field : string; idx : index }
   | Repeat of { var : string; count : int; body : stmt list }
 
-type program = { wires : wire_spec list; decls : decl list; body : stmt list }
+type program = {
+  wires : wire_spec list;
+  decls : decl list;
+  body : stmt list;
+  constraints : constr list;
+}
 
 (* ---------- specialization ---------- *)
 
@@ -78,7 +91,7 @@ type instr =
 let owner_of prog name =
   List.find_map
     (function
-      | Field { name = n; owner; _ } | Time { name = n; owner } ->
+      | Field { name = n; owner; _ } | Time { name = n; owner } | Lit { name = n; owner; _ } ->
           if n = name then Some owner else None)
     prog.decls
   |> function
@@ -122,6 +135,7 @@ type outcome =
   | Deadline_missed
   | Early_edge
   | Bad_wire          (* sampled Float or Contention *)
+  | Mismatch          (* observed wire contradicts a literal *)
 
 type event = { tick : int; outcome : outcome; var : string; bit : int }
 
@@ -138,6 +152,7 @@ type agent = {
   drives : (string, drive) Hashtbl.t;
   env : (string, level option array) Hashtbl.t;
   mutable events : event list;
+  lits : (string * unit) list;
 }
 
 let make_agent ~name prog assignment ~inputs =
@@ -150,12 +165,14 @@ let make_agent ~name prog assignment ~inputs =
            | Some bits -> List.iteri (fun i b -> a.(i) <- Some b) bits
            | None -> ());
           Hashtbl.replace env name a
+      | Lit { name; value; _ } -> Hashtbl.replace env name [| Some value |]
       | Time _ -> ())
     prog.decls;
   { aname = name; machine = specialize prog assignment;
     specs = List.map (fun w -> (w.name, w)) prog.wires;
     pc = 0; phase = Ready; anchor = 0; demoted = [];
-    drives = Hashtbl.create 4; env; events = [] }
+    drives = Hashtbl.create 4; env; events = [];
+    lits = List.filter_map (function Lit { name; _ } -> Some (name, ()) | _ -> None) prog.decls }
 
 let log a tick outcome var bit = a.events <- { tick; outcome; var; bit } :: a.events
 
@@ -192,7 +209,10 @@ let step a ~tick ~now ~prev =
                 a.demoted <- role :: a.demoted;
                 release_all a
               end
-          | V lv, Observed -> cell.(bit) <- Some lv
+          | V lv, Observed -> (
+              match (List.mem_assoc field a.lits, cell.(bit)) with
+              | true, Some expect when expect <> lv -> log a tick Mismatch field bit
+              | _ -> cell.(bit) <- Some lv)
           | (Float | Contention), _ -> log a tick Bad_wire field bit);
          a.pc <- a.pc + 1
      | IEdge { wire; level; time; role; own; min_after; max_after } -> (
@@ -288,3 +308,122 @@ let field_value a name =
   |> String.concat ""
 
 let outcomes a o = List.filter (fun e -> e.outcome = o) (List.rev a.events)
+
+(* ---------- timing certificate ----------
+
+   Static schedule of one role's specialized machine. Every event is placed
+   relative to the previous edge (its anchor):
+     - supplied dominant edge:  exactly min_after + 1 (1 tick to resolve)
+     - supplied recessive edge: [min_after + 1, inf), a peer may hold it back
+     - observed edge:           the program's window [min_after, max_after]
+     - put:                     exactly 1 tick after its anchor
+   Distances along the anchor chain are summed as intervals, so a stretched
+   rise leaves the following fall's offset exact. *)
+
+type bound = { lo : int; hi : int option }
+
+type tev = {
+  label : event_ref;
+  base : int;
+  off : bound;
+  is_edge : bool;
+  mine : bool;
+}
+
+let schedule prog assignment =
+  let evs = ref [] and n = ref 0 and anchor = ref (-1) in
+  let push e = evs := e :: !evs; incr n; !n - 1 in
+  Array.iter
+    (function
+      | IEdge { wire; level; time; own; min_after; max_after; _ } ->
+          let spec = List.find (fun s -> s.name = wire) prog.wires in
+          let off =
+            match own with
+            | Observed -> { lo = min_after; hi = Some max_after }
+            | Supplied ->
+                if spec.resolution <> PushPull && drive_for spec level = HighZ
+                then { lo = min_after + 1; hi = None }
+                else { lo = min_after + 1; hi = Some (min_after + 1) }
+          in
+          anchor :=
+            push { label = At time; base = !anchor; off; is_edge = true;
+                   mine = own = Supplied }
+      | IPut { wire; own; _ } ->
+          ignore
+            (push { label = Change wire; base = !anchor; off = { lo = 1; hi = Some 1 };
+                    is_edge = false; mine = own = Supplied })
+      | ISample _ -> ())
+    (specialize prog assignment);
+  Array.of_list (List.rev !evs)
+
+(* Distance a -> b (a before b). Second component: relies on a peer event. *)
+let distance evs a b =
+  let ea = if evs.(a).is_edge then a else evs.(a).base in
+  let add x y = { lo = x.lo + y.lo;
+                  hi = (match (x.hi, y.hi) with Some p, Some q -> Some (p + q) | _ -> None) } in
+  let rec up i acc peer =
+    if i = ea then (acc, peer)
+    else up evs.(i).base (add acc evs.(i).off) (peer || not evs.(i).mine)
+  in
+  let d, peer = up b { lo = 0; hi = Some 0 } false in
+  if evs.(a).is_edge then (d, peer)
+  else ({ lo = d.lo - 1; hi = Option.map (fun h -> h - 1) d.hi }, peer || not evs.(a).mine)
+
+type cert_line = {
+  constr : constr;
+  instances : int;
+  guaranteed : bound;
+  assumes_peer : bool;
+  pass : bool;
+}
+
+let certify prog assignment =
+  let evs = schedule prog assignment in
+  List.map
+    (fun c ->
+      let acc = ref None and peer = ref false and k = ref 0 in
+      (* Pair each [from] with the next [to], unless another [from] comes first. *)
+      Array.iteri
+        (fun a ea ->
+          if ea.label = c.from_ then begin
+            let b = ref (a + 1) in
+            while !b < Array.length evs && evs.(!b).label <> c.to_
+                  && evs.(!b).label <> c.from_ do incr b done;
+            if !b < Array.length evs && evs.(!b).label = c.to_
+               && (ea.mine || evs.(!b).mine) then begin
+              let b = !b in
+              let d, p = distance evs a b in
+              incr k;
+              peer := !peer || p;
+              acc :=
+                Some
+                  (match !acc with
+                   | None -> d
+                   | Some x ->
+                       { lo = min x.lo d.lo;
+                         hi = (match (x.hi, d.hi) with
+                               | Some p, Some q -> Some (max p q) | _ -> None) })
+            end
+          end)
+        evs;
+      let g = Option.value !acc ~default:{ lo = 0; hi = Some 0 } in
+      { constr = c; instances = !k; guaranteed = g; assumes_peer = !peer;
+        pass = !k > 0 && g.lo >= c.min_ticks })
+    prog.constraints
+
+let print_certificate ?(tick_ns = 20) title lines =
+  let ns t = float_of_int (t * tick_ns) in
+  Printf.printf "%s\n  %-9s %10s %22s %10s  %s\n" title "constraint" "spec" "guaranteed" "margin" "";
+  List.iter
+    (fun l ->
+      let hi = match l.guaranteed.hi with
+        | Some h when h = l.guaranteed.lo -> ""
+        | Some h -> Printf.sprintf "..%.0f" (ns h)
+        | None -> "..inf" in
+      Printf.printf "  %-9s %8.0fns %14.0fns%-8s %+8.0fns  %s%s (%d)\n" l.constr.cname
+        (ns l.constr.min_ticks) (ns l.guaranteed.lo) hi
+        (ns (l.guaranteed.lo - l.constr.min_ticks))
+        (if l.pass then "PASS" else "FAIL")
+        (if l.assumes_peer then " assumes peer" else "") l.instances)
+    lines;
+  Printf.printf "  %s\n" (if List.for_all (fun l -> l.pass) lines then "PASS" else "FAIL")
