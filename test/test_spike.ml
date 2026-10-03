@@ -245,5 +245,45 @@ let () =
   let _, rg = man_run ~mutate_tr:glitch () in
   check "glitch inside the blanking window is ignored" (field_value rg "data" = word);
 
+  print_endline "13. io model: 2-cycle synchronizer, 1-cycle output delay";
+  let io = { sync = 2; out = 1; skew = 0; jitter = 0 } in
+  let ci = make_agent ~in_sync:2 ~out_delay:1 ~name:"CI" wt (Run_as [ "controller" ])
+      ~inputs:[ ("addr", bits "10100110"); ("data", bits "01011101") ] in
+  let ti = make_agent ~in_sync:2 ~out_delay:1 ~name:"TI" wt (Run_as [ "target" ])
+      ~inputs:[ ("ack", bits "0"); ("ack2", bits "0") ] in
+  let oi = make_agent ~name:"OI" wt Observe_all ~inputs:[] in
+  let tri = simulate ~wires:I2c.wires ~agents:[ ci; ti; oi ] ~ticks:3000 () in
+  check "transaction still decodes with io delays on both ends"
+    (field_value oi "data" = "01011101" && field_value ti "data" = "01011101"
+     && field_value ci "ack2" = "0"
+     && List.for_all (fun x -> clean x && outcomes x Mismatch = [] && done_ x) [ ci; ti; oi ]);
+  let certi = certify ~io wt (Run_as [ "controller" ]) in
+  let edges_in tr w lv =
+    let rec go acc prev = function
+      | [] -> List.rev acc
+      | (t, vs) :: rest ->
+          let v = List.assoc w vs in
+          go (if prev <> Some v && v = lv then t :: acc else acc) (Some v) rest
+    in
+    go [] None tr
+  in
+  let lo name = (List.find (fun l -> l.constr.cname = name) certi).guaranteed.lo in
+  let sf = edges_in tri "SCL" L0 and sr = edges_in tri "SCL" L1 in
+  let df = edges_in tri "SDA" L0 and dr = edges_in tri "SDA" L1 in
+  let lvl t w = List.assoc w (List.assoc t tri) in
+  let changes = List.filter (fun t -> lvl t "SCL" = L0) (df @ dr) |> List.sort compare in
+  let exact =
+    [ ("tLOW", minl (gaps sf sr)); ("tHIGH", minl (gaps sr sf));
+      ("tHD;STA", List.hd sf - List.hd df);
+      ("tSU;STO", minl (gaps sr [ List.nth dr (List.length dr - 1) ])) ] in
+  List.iter
+    (fun (n, m) -> check (Printf.sprintf "%s on the bus %d ticks = certified %d" n m (lo n)) (m = lo n))
+    exact;
+  let su = minl (gaps changes sr) and hd = minl (gaps sf changes) in
+  check (Printf.sprintf "tSU;DAT on the bus %d >= certified %d" su (lo "tSU;DAT")) (su >= lo "tSU;DAT");
+  check (Printf.sprintf "tHD;DAT on the bus %d >= certified %d" hd (lo "tHD;DAT")) (hd >= lo "tHD;DAT");
+  print_certificate "  I2C Fast-mode, controller, io sync=2 out=1 skew=1 jitter=1"
+    (certify ~io:{ sync = 2; out = 1; skew = 1; jitter = 1 } wt (Run_as [ "controller" ]));
+
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

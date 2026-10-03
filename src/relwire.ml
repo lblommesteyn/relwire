@@ -175,9 +175,11 @@ type agent = {
   mutable events : event list;
   lits : (string * unit) list;
   clock : float;  (* this agent's tick length relative to nominal *)
+  in_sync : int;  (* ticks from bus to what this agent sees *)
+  out_delay : int;  (* extra ticks from this agent's drive to the bus *)
 }
 
-let make_agent ?(clock = 1.0) ~name prog assignment ~inputs =
+let make_agent ?(clock = 1.0) ?(in_sync = 0) ?(out_delay = 0) ~name prog assignment ~inputs =
   let env = Hashtbl.create 8 in
   List.iter
     (function
@@ -194,7 +196,7 @@ let make_agent ?(clock = 1.0) ~name prog assignment ~inputs =
     specs = List.map (fun w -> (w.name, w)) prog.wires;
     pc = 0; phase = Ready; anchor = 0; demoted = [];
     drives = Hashtbl.create 4; env; events = [];
-    clock;
+    clock; in_sync; out_delay;
     lits = List.filter_map (function Lit { name; _ } -> Some (name, ()) | _ -> None) prog.decls }
 
 let log a tick outcome var bit = a.events <- { tick; outcome; var; bit } :: a.events
@@ -260,7 +262,7 @@ let step a ~tick ~now ~prev =
                a.phase <- Driven tick
              end;
              continue := false
-         | Driven t0, _ when tick > t0 ->
+         | Driven t0, _ when tick > t0 + a.out_delay + a.in_sync ->
              (match now wire with
               | V lv when cell.(bit) = Some lv -> log a tick Match field bit
               | V lv ->
@@ -306,7 +308,7 @@ let step a ~tick ~now ~prev =
                a.phase <- Driven tick
              end;
              continue := false
-         | Driven t0, _ when tick > t0 ->
+         | Driven t0, _ when tick > t0 + a.out_delay + a.in_sync ->
              if now wire = V level then (log a tick Match time 0; finish ())
              else begin
                (* Peer holds the wire: the edge time is now the peer's. *)
@@ -327,14 +329,22 @@ type trace = (int * (string * level) list) list
 
 let simulate ~(wires : wire_spec list) ~(agents : agent list)
     ?(raw : raw list = []) ~ticks () : trace =
-  let prev = Hashtbl.create 4 in
+  let hist = Array.make ticks (Hashtbl.create 1) in
+  (* snaps.(i).(t): agent i's drives at the end of tick t *)
+  let snaps = List.map (fun _ -> Array.make ticks []) agents in
   let trace = ref [] in
   for tick = 0 to ticks - 1 do
     let cur = Hashtbl.create 4 in
     List.iter
       (fun spec ->
         let ds =
-          List.filter_map (fun a -> Hashtbl.find_opt a.drives spec.name) agents
+          List.concat
+            (List.map2
+               (fun a snap ->
+                 let k = tick - 1 - a.out_delay in
+                 if k < 0 then []
+                 else List.filter_map (fun (w, d) -> if w = spec.name then Some d else None) snap.(k))
+               agents snaps)
           @ List.concat_map
               (fun r ->
                 List.filter_map
@@ -344,17 +354,19 @@ let simulate ~(wires : wire_spec list) ~(agents : agent list)
         in
         Hashtbl.replace cur spec.name (resolve spec ds))
       wires;
-    if tick = 0 then Hashtbl.iter (Hashtbl.replace prev) cur;
-    let now w = Hashtbl.find cur w and prev_v w = Hashtbl.find prev w in
-    List.iter (fun a -> step a ~tick ~now ~prev:prev_v) agents;
+    hist.(tick) <- cur;
+    List.iter2
+      (fun a snap ->
+        let at k w = Hashtbl.find hist.(max 0 k) w in
+        step a ~tick ~now:(at (tick - a.in_sync)) ~prev:(at (tick - a.in_sync - 1));
+        snap.(tick) <- Hashtbl.fold (fun w d acc -> (w, d) :: acc) a.drives [])
+      agents snaps;
     trace :=
       ( tick,
         List.filter_map
           (fun s -> match Hashtbl.find cur s.name with V l -> Some (s.name, l) | _ -> None)
           wires )
-      :: !trace;
-    Hashtbl.reset prev;
-    Hashtbl.iter (Hashtbl.replace prev) cur
+      :: !trace
   done;
   List.rev !trace
 
@@ -379,63 +391,78 @@ let outcomes a o = List.filter (fun e -> e.outcome = o) (List.rev a.events)
 
 (* ---------- timing certificate ----------
 
-   Static schedule of one role's specialized machine. Every event is placed
-   relative to the previous edge (its anchor):
-     - supplied dominant edge:  exactly min_after + 1 (1 tick to resolve)
-     - supplied recessive edge: [min_after + 1, inf), a peer may hold it back
-     - observed edge:           the program's window [min_after, max_after]
-     - put:                     exactly 1 tick after its anchor
+   Static schedule of one role's specialized machine, in that machine's own
+   timeline (the ticks at which it acts). Each event also carries [delta]:
+   bus time minus machine time. With an io model (input synchronizer
+   [sync], output delay [out], sampling [jitter], inter-wire [skew]):
+     - supplied dominant edge:  offset exactly min + 1 + out + sync
+                                (drive, resolve, pad out, synchronize back)
+     - supplied recessive edge: [min + 1 + out + sync, inf), a peer may hold it
+     - observed edge:           the program's window [min, max]
+     - put:                     at its anchor; reaches the bus 1 + out later
+   Supplied and observed edges are seen [sync, sync + jitter] after the bus.
    Distances along the anchor chain are summed as intervals, so a stretched
    rise leaves the following fall's offset exact. *)
 
 type bound = { lo : int; hi : int option }
 
+type io = { sync : int; out : int; skew : int; jitter : int }
+
+let ideal_io = { sync = 0; out = 0; skew = 0; jitter = 0 }
+
 type tev = {
   label : event_ref;
+  wire : string option;
   base : int;
   off : bound;
+  delta : int * int;
   is_edge : bool;
   mine : bool;
 }
 
-let schedule prog assignment =
+let schedule ?(io = ideal_io) prog assignment =
   let evs = ref [] and n = ref 0 and anchor = ref (-1) in
   let push e = evs := e :: !evs; incr n; !n - 1 in
+  let lat = 1 + io.out + io.sync in
+  let seen_mine = (-io.sync, -io.sync) and seen_peer = (-io.sync - io.jitter, -io.sync) in
   Array.iter
     (function
       | IEdge { wire; level; time; own; min_after; max_after; _ } ->
           let spec = List.find (fun s -> s.name = wire) prog.wires in
-          let off =
+          let off, delta =
             match own with
-            | Observed -> { lo = min_after; hi = Some max_after }
+            | Observed -> ({ lo = min_after; hi = Some max_after }, seen_peer)
             | Supplied ->
                 if spec.resolution <> PushPull && drive_for spec level = HighZ
-                then { lo = min_after + 1; hi = None }
-                else { lo = min_after + 1; hi = Some (min_after + 1) }
+                then ({ lo = min_after + lat; hi = None }, seen_mine)
+                else ({ lo = min_after + lat; hi = Some (min_after + lat) }, seen_mine)
           in
           anchor :=
-            push { label = At time; base = !anchor; off; is_edge = true;
-                   mine = own = Supplied }
+            push { label = At time; wire = Some wire; base = !anchor; off; delta;
+                   is_edge = true; mine = own = Supplied }
       | IPut { wire; own; _ } ->
           ignore
-            (push { label = Change wire; base = !anchor; off = { lo = 1; hi = Some 1 };
+            (push { label = Change wire; wire = Some wire; base = !anchor;
+                    off = { lo = 0; hi = Some 0 }; delta = (1 + io.out, 1 + io.out);
                     is_edge = false; mine = own = Supplied })
-      | IToggle { time; own; nominal; min_after; max_after; _ } ->
-          let off = match own with
-            | Supplied -> { lo = nominal + 1; hi = Some (nominal + 1) }
-            | Observed -> { lo = min_after; hi = Some max_after } in
-          anchor := push { label = At time; base = !anchor; off; is_edge = true;
-                           mine = own = Supplied }
+      | IToggle { wire; time; own; nominal; min_after; max_after; _ } ->
+          let off, delta = match own with
+            | Supplied -> ({ lo = nominal + lat; hi = Some (nominal + lat) }, seen_mine)
+            | Observed -> ({ lo = min_after; hi = Some max_after }, seen_peer) in
+          anchor := push { label = At time; wire = Some wire; base = !anchor; off; delta;
+                           is_edge = true; mine = own = Supplied }
       | IAfter { time; ticks } ->
           anchor :=
-            push { label = At time; base = !anchor; off = { lo = ticks; hi = Some ticks };
+            push { label = At time; wire = None; base = !anchor;
+                   off = { lo = ticks; hi = Some ticks }; delta = (0, 0);
                    is_edge = true; mine = true }
       | ISample _ -> ())
     (specialize prog assignment);
   Array.of_list (List.rev !evs)
 
-(* Distance a -> b (a before b). Second component: relies on a peer event. *)
-let distance evs a b =
+(* Bus-time distance a -> b (a before b). Second component: relies on a
+   peer event. *)
+let distance ?(io = ideal_io) evs a b =
   let ea = if evs.(a).is_edge then a else evs.(a).base in
   let add x y = { lo = x.lo + y.lo;
                   hi = (match (x.hi, y.hi) with Some p, Some q -> Some (p + q) | _ -> None) } in
@@ -444,8 +471,16 @@ let distance evs a b =
     else up evs.(i).base (add acc evs.(i).off) (peer || not evs.(i).mine)
   in
   let d, peer = up b { lo = 0; hi = Some 0 } false in
-  if evs.(a).is_edge then (d, peer)
-  else ({ lo = d.lo - 1; hi = Option.map (fun h -> h - 1) d.hi }, peer || not evs.(a).mine)
+  let off_a = if evs.(a).is_edge then 0 else evs.(a).off.lo in
+  let da_lo, da_hi = evs.(a).delta and db_lo, db_hi = evs.(b).delta in
+  let skew =
+    match (evs.(a).wire, evs.(b).wire) with
+    | Some x, Some y when x <> y -> io.skew
+    | _ -> 0
+  in
+  ( { lo = d.lo - off_a + db_lo - da_hi - skew;
+      hi = Option.map (fun h -> h - off_a + db_hi - da_lo + skew) d.hi },
+    peer || not evs.(a).mine )
 
 type cert_line = {
   constr : constr;
@@ -455,8 +490,8 @@ type cert_line = {
   pass : bool;
 }
 
-let certify prog assignment =
-  let evs = schedule prog assignment in
+let certify ?(io = ideal_io) prog assignment =
+  let evs = schedule ~io prog assignment in
   List.map
     (fun c ->
       let acc = ref None and peer = ref false and k = ref 0 in
@@ -470,7 +505,7 @@ let certify prog assignment =
             if !b < Array.length evs && evs.(!b).label = c.to_
                && (ea.mine || evs.(!b).mine) then begin
               let b = !b in
-              let d, p = distance evs a b in
+              let d, p = distance ~io evs a b in
               incr k;
               peer := !peer || p;
               acc :=
