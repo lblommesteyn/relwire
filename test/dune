@@ -1,0 +1,4 @@
+(test
+ (name test_spike)
+ (libraries relwire_lib)
+ (flags (:standard -warn-error -a)))

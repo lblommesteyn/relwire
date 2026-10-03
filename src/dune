@@ -1,0 +1,4 @@
+(library
+ (name relwire_lib)
+ (wrapped false)
+ (flags (:standard -warn-error -a)))
