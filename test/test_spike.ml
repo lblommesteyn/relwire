@@ -285,5 +285,21 @@ let () =
   print_certificate "  I2C Fast-mode, controller, io sync=2 out=1 skew=1 jitter=1"
     (certify ~io:{ sync = 2; out = 1; skew = 1; jitter = 1 } wt (Run_as [ "controller" ]));
 
+  print_endline "14. .rw sources parse to exactly the OCaml-built programs";
+  let ex f = Rw_parse.program_of_file ("../examples/" ^ f) in
+  check "i2c.rw = I2c.write_transaction" (ex "i2c.rw" = I2c.write_transaction);
+  check "uart.rw = Uart.frame" (ex "uart.rw" = Uart.frame);
+  check "spi.rw = Spi.exchange" (ex "spi.rw" = Spi.exchange);
+  check "manchester.rw = Manchester.frame 32" (ex "manchester.rw" = Manchester.frame 32);
+  let bad src =
+    match Rw_parse.program_of_string src with
+    | _ -> None
+    | exception Rw_parse.Parse_error (line, msg) -> Some (line, msg)
+  in
+  check "undeclared field is a parse error with its line"
+    (bad "wire D push_pull floating\nprotocol {\n  put D x[0]\n}" = Some (3, "undeclared field x"));
+  check "there is no syntax for asking the mode"
+    (bad "wire D push_pull floating\nprotocol {\n  if mode {\n}\n}" <> None);
+
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

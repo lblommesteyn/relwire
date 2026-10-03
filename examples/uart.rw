@@ -1,0 +1,28 @@
+# UART 8N1. No clock wire: samples are timer marks at mid-bit, counted
+# from the start bit's falling edge. 100 ticks per bit.
+
+const bit  = 100
+const half = bit / 2
+
+wire TXD push_pull pull_up
+
+field data[8]      from tx
+lit   start_lo = 0 from tx
+lit   stop_hi  = 1 from tx
+time  start        from tx
+
+protocol {
+  edge TXD -> 0 @start in [10, inf]
+  after mid half
+  sample TXD start_lo[0]
+  repeat i 8 {
+    after boundary half
+    put TXD data[i]
+    after mid half
+    sample TXD data[i]
+  }
+  after boundary half
+  put TXD stop_hi[0]
+  after mid half
+  sample TXD stop_hi[0]
+}

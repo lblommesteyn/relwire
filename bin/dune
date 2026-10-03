@@ -1,0 +1,5 @@
+(executable
+ (name relwirec)
+ (public_name relwirec)
+ (libraries relwire_lib)
+ (flags (:standard -warn-error -a)))

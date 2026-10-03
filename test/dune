@@ -1,4 +1,5 @@
 (test
  (name test_spike)
  (libraries relwire_lib)
+ (deps (glob_files %{project_root}/examples/*.rw))
  (flags (:standard -warn-error -a)))

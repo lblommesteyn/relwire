@@ -1,0 +1,22 @@
+# Manchester, IEEE 802.3 polarity (1 = low->high at mid-bit), 32-bit frame.
+# Each mid-bit transition carries the data AND re-anchors the receiver.
+
+const half = 50
+const n    = 32
+
+wire LINE push_pull pull_up
+
+field data[n]   from tx
+lit   sync = 1  from tx
+time  sof       from tx
+
+protocol {
+  edge LINE -> 0 @sof in [10, inf]
+  toggle LINE sync[0] @mid at half in [half / 2, half + half / 2]
+  repeat i n {
+    after boundary half
+    put_not LINE data[i]
+    toggle  LINE data[i] @mid at half in [half / 2, half + half / 2]
+  }
+  after end half
+}

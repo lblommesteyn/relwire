@@ -1,0 +1,25 @@
+# SPI mode 0, full duplex. Both roles supply a bit in the same cell.
+
+const half = 25   # 1 MHz SCLK at 50 MHz
+
+wire CS   push_pull pull_up
+wire SCLK push_pull pull_down
+wire MOSI push_pull floating
+wire MISO push_pull floating
+
+field mosi[8] from controller
+field miso[8] from target
+time  cs_fall, cs_rise, sclk_rise, sclk_fall from controller
+
+protocol {
+  edge CS -> 0 @cs_fall in [10, inf]
+  repeat i 8 {
+    put    MOSI mosi[i]
+    put    MISO miso[i]
+    edge   SCLK -> 1 @sclk_rise in [half, inf]
+    sample MOSI mosi[i]
+    sample MISO miso[i]
+    edge   SCLK -> 0 @sclk_fall in [half, inf]
+  }
+  edge CS -> 1 @cs_rise in [half, inf]
+}
