@@ -14,6 +14,7 @@ let prog = I2c.address_byte
 let ctrl name addr = make_agent ~name prog (Run_as [ "controller" ]) ~inputs:[ ("addr", bits addr) ]
 let target () = make_agent ~name:"T" prog (Run_as [ "target" ]) ~inputs:[ ("ack", bits "0") ]
 let observer name = make_agent ~name prog Observe_all ~inputs:[]
+let observer_of p name = make_agent ~name p Observe_all ~inputs:[]
 
 let clean a =
   outcomes a Deadline_missed = [] && outcomes a Early_edge = [] && outcomes a Bad_wire = []
@@ -300,6 +301,113 @@ let () =
     (bad "wire D push_pull floating\nprotocol {\n  put D x[0]\n}" = Some (3, "undeclared field x"));
   check "there is no syntax for asking the mode"
     (bad "wire D push_pull floating\nprotocol {\n  if mode {\n}\n}" <> None);
+
+  print_endline "15. CAN: bit stuffing as a branch on shared wire history";
+  let crc15 lvls =
+    List.fold_left
+      (fun crc b ->
+        let nxt = (if b = L1 then 1 else 0) lxor ((crc lsr 14) land 1) in
+        let crc = (crc lsl 1) land 0x7fff in
+        if nxt = 1 then crc lxor 0x4599 else crc)
+      0 lvls
+  in
+  let to_bits n v = String.init n (fun i -> if (v lsr (n - 1 - i)) land 1 = 1 then '1' else '0') in
+  let header id dlc data = bits ("0" ^ id ^ "000" ^ dlc ^ data) in
+  let crc_of id dlc data = to_bits 15 (crc15 (header id dlc data)) in
+  (* reference stuffer: stuff bits inserted into SOF..CRC *)
+  let stuff_count lvls =
+    let rec go cnt last run = function
+      | [] -> cnt
+      | b :: r ->
+          if Some b = last then
+            if run + 1 = 5 then go (cnt + 1) (Some (if b = L0 then L1 else L0)) 1 r
+            else go cnt last (run + 1) r
+          else go cnt (Some b) 1 r
+    in
+    go 0 None 0 lvls
+  in
+  let can_tx name id data =
+    make_agent ~name Can.frame (Run_as [ "tx" ])
+      ~inputs:[ ("id", bits id); ("dlc", bits "0001"); ("data", bits data);
+                ("crc", bits (crc_of id "0001" data)) ]
+  in
+  let can_rx name = make_agent ~name Can.frame (Run_as [ "rx" ]) ~inputs:[ ("ack", bits "0") ] in
+  let id1 = "00000111111" and d1 = "11111111" in
+  let t1 = can_tx "TX" id1 d1 and r1 = can_rx "RX" and o1 = observer_of Can.frame "CO" in
+  let trc = simulate ~wires:Can.wires ~agents:[ t1; r1; o1 ] ~ticks:8000 () in
+  let expected_stuff =
+    stuff_count (header id1 "0001" d1 @ bits (crc_of id1 "0001" d1)) in
+  let got_stuff = List.length (List.filter (fun e -> e.var = "stuff") t1.events) in
+  check (Printf.sprintf "transmitter inserts %d stuff bits, reference stuffer says %d"
+           got_stuff expected_stuff)
+    (got_stuff = expected_stuff && got_stuff > 0);
+  check "receiver and observer de-stuff: id, data, CRC decode"
+    (List.for_all
+       (fun x -> field_value x "id" = id1 && field_value x "data" = d1
+                 && field_value x "crc" = crc_of id1 "0001" d1)
+       [ r1; o1 ]);
+  check "transmitter sees the ACK; no mismatches; all finished"
+    (field_value t1 "ack" = "0"
+     && List.for_all (fun x -> outcomes x Mismatch = [] && clean x && done_ x) [ t1; r1; o1 ]);
+
+  let ida = "00000111111" and idb = "00000101111" in
+  let ta = can_tx "A" ida "10101010" and tb = can_tx "B" idb "11110000" in
+  let r2 = can_rx "RX2" and o2 = observer_of Can.frame "CO2" in
+  ignore (simulate ~wires:Can.wires ~agents:[ ta; tb; r2; o2 ] ~ticks:8000 ());
+  check "A loses arbitration at id[6], B never loses"
+    ((match outcomes ta Arbitration_lost with [ { var = "id"; bit = 6; _ } ] -> true | _ -> false)
+     && outcomes tb Arbitration_lost = []);
+  check "loser and observer decode B's frame, and its CRC checks"
+    (List.for_all
+       (fun x -> field_value x "id" = idb && field_value x "data" = "11110000"
+                 && field_value x "crc" = crc_of idb "0001" "11110000")
+       [ ta; o2 ]);
+  check "stuffing stays in lockstep across the collision (no Mismatch anywhere)"
+    (List.for_all (fun x -> outcomes x Mismatch = [] && done_ x) [ ta; tb; r2; o2 ]);
+
+  let first_stuff = (List.find (fun e -> e.var = "stuff") (List.rev t1.events)).tick in
+  let o3 = observer_of Can.frame "CO3" in
+  let flip tr =
+    List.map
+      (fun (t, vs) ->
+        if t >= first_stuff - 74 && t < first_stuff + 26 then
+          (t, [ ("CAN", if List.assoc "CAN" vs = L0 then L1 else L0) ])
+        else (t, vs))
+      tr
+  in
+  ignore (simulate ~wires:Can.wires ~agents:[ o3 ] ~raw:[ replay (flip trc) Can.wires ] ~ticks:8000 ());
+  check "a flipped stuff bit is reported as a stuff error (Mismatch on stuff)"
+    (List.exists (fun e -> e.var = "stuff") (outcomes o3 Mismatch));
+
+  print_endline "16. branch lint and I2C read-or-write";
+  let early =
+    { (I2c.address_byte) with
+      body = If_bit { field = "addr"; idx = Const 7; level = L1; then_ = []; else_ = [] }
+             :: I2c.address_byte.body } in
+  check "branching on a bit nobody has sampled yet is rejected"
+    (match specialize early (Run_as [ "controller" ]) with
+     | _ -> false
+     | exception Failure _ -> true);
+  check "can.rw = Can.frame" (Rw_parse.program_of_file "../examples/can.rw" = Can.frame);
+  let rw = Rw_parse.program_of_file "../examples/i2c_rw.rw" in
+  let run_rw addr =
+    let c = make_agent ~name:"C" rw (Run_as [ "controller" ])
+        ~inputs:[ ("addr", bits addr); ("wdata", bits "11001010"); ("rack", bits "1") ] in
+    let t = make_agent ~name:"T" rw (Run_as [ "target" ])
+        ~inputs:[ ("ack", bits "0"); ("wack", bits "0"); ("rdata", bits "00110101") ] in
+    let o = observer_of rw "O" in
+    ignore (simulate ~wires:I2c.wires ~agents:[ c; t; o ] ~ticks:3000 ());
+    (c, t, o)
+  in
+  let c, t, o = run_rw "10100110" in
+  check "write: target receives wdata, read branch untouched"
+    (field_value t "wdata" = "11001010" && field_value o "rdata" = "????????"
+     && List.for_all (fun x -> clean x && outcomes x Mismatch = [] && done_ x) [ c; t; o ]);
+  let c, t, o = run_rw "10100111" in
+  check "read: controller receives rdata from the target, NACKs it"
+    (field_value c "rdata" = "00110101" && field_value o "rack" = "1"
+     && field_value o "wdata" = "????????"
+     && List.for_all (fun x -> clean x && outcomes x Mismatch = [] && done_ x) [ c; t; o ]);
 
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

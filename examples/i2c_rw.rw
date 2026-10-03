@@ -1,0 +1,45 @@
+# I2C single-byte read OR write. The R/W bit (addr[7]) decides who owns the
+# data byte and who ACKs it. Every role has sampled addr[7] before the
+# branch, so they all take the same side.
+
+const t_hd_sta = 30
+const t_low    = 65
+const t_high   = 30
+const t_su_sto = 30
+
+wire SCL dominant_low pull_up
+wire SDA dominant_low pull_up
+
+field addr[8]  from controller
+field ack[1]   from target
+field wdata[8] from controller
+field wack[1]  from target
+field rdata[8] from target
+field rack[1]  from controller
+lit   stop_lo = 0 from controller
+time  start, stop, scl_rise, scl_fall from controller
+
+macro bit_cell(f, i) {
+  put    SDA f[i]
+  edge   SCL -> 1 @scl_rise in [t_low, inf]
+  sample SDA f[i]
+  edge   SCL -> 0 @scl_fall in [t_high, inf]
+}
+
+protocol {
+  edge SDA -> 0 @start    in [10, inf]
+  edge SCL -> 0 @scl_fall in [t_hd_sta, inf]
+  repeat i 8 { use bit_cell(addr, i) }
+  use bit_cell(ack, 0)
+  if addr[7] == 1 {
+    repeat i 8 { use bit_cell(rdata, i) }
+    use bit_cell(rack, 0)
+  } else {
+    repeat i 8 { use bit_cell(wdata, i) }
+    use bit_cell(wack, 0)
+  }
+  put    SDA stop_lo[0]
+  edge   SCL -> 1 @scl_rise in [t_low, inf]
+  sample SDA stop_lo[0]
+  edge   SDA -> 1 @stop in [t_su_sto, inf]
+}

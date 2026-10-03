@@ -1,0 +1,58 @@
+# CAN 2.0A base frame, one data byte. NRZ, sampled at 75%, hard sync on SOF.
+# Bit stuffing branches on wire history that every role has sampled, so
+# every specialization takes the branch together. 100 ticks per bit.
+
+const seg1 = 75
+const seg2 = 25
+
+wire CAN dominant_low pull_up
+
+field   id[11]  from tx
+field   dlc[4]  from tx
+field   data[8] from tx
+field   crc[15] from tx
+field   ack[1]  from rx
+lit     dominant  = 0 from tx
+lit     recessive = 1 from tx
+derived stuff from tx
+time    sof from tx
+
+macro stuff_check() {
+  if_run CAN 5 set stuff {
+    put    CAN stuff[0]
+    after  sample seg1
+    sample CAN stuff[0]
+    after  boundary seg2
+  }
+}
+
+macro plain(f, i) {
+  put    CAN f[i]
+  after  sample seg1
+  sample CAN f[i]
+  after  boundary seg2
+}
+
+macro stuffed(f, i) {
+  use plain(f, i)
+  use stuff_check()
+}
+
+protocol {
+  edge   CAN -> 0 @sof in [10, inf]
+  after  sample seg1
+  sample CAN dominant[0]
+  after  boundary seg2
+  use stuff_check()
+  repeat i 11 { use stuffed(id, i) }
+  use stuffed(dominant, 0)    # RTR
+  use stuffed(dominant, 0)    # IDE
+  use stuffed(dominant, 0)    # r0
+  repeat i 4  { use stuffed(dlc, i) }
+  repeat i 8  { use stuffed(data, i) }
+  repeat i 15 { use stuffed(crc, i) }
+  use plain(recessive, 0)     # CRC delimiter
+  use plain(ack, 0)
+  use plain(recessive, 0)     # ACK delimiter
+  repeat i 7  { use plain(recessive, 0) }
+}

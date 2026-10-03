@@ -40,7 +40,7 @@ let lex src =
       push (Str (String.sub src (!i + 1) (!j - !i - 1)));
       i := !j + 1
     end
-    else if !i + 1 < n && List.mem (String.sub src !i 2) [ "->"; ">=" ] then begin
+    else if !i + 1 < n && List.mem (String.sub src !i 2) [ "->"; ">="; "==" ] then begin
       push (Sym (String.sub src !i 2));
       i := !i + 2
     end
@@ -122,7 +122,10 @@ let level st =
   | t -> err st (Printf.sprintf "expected 0 or 1, found '%s'" (show t))
 
 let declared_field st name =
-  List.exists (function Field { name = n; _ } | Lit { name = n; _ } -> n = name | _ -> false) st.decls
+  List.exists
+    (function Field { name = n; _ } | Lit { name = n; _ } | Derived { name = n; _ } -> n = name
+            | _ -> false)
+    st.decls
 
 let declared_time st name =
   List.exists (function Time { name = n; _ } -> n = name | _ -> false) st.decls
@@ -200,6 +203,32 @@ and stmt st scope =
       let nominal = expr st in
       let min_after, max_after = window st in
       [ Toggle { wire; field; idx; time; nominal; min_after; max_after } ]
+  | Id "if_run" ->
+      ignore (next st);
+      let wire = wire_ref st in
+      let n = expr st in
+      let set =
+        match peek st with
+        | Id "set" ->
+            ignore (next st);
+            let f = ident st in
+            if not (declared_field st f) then err st ("undeclared field " ^ f);
+            Some f
+        | _ -> None
+      in
+      [ If_run { wire; n; set; body = block st scope } ]
+  | Id "if" ->
+      ignore (next st);
+      let field, idx = bit_ref st scope in
+      expect st "==";
+      let level = level st in
+      let then_ = block st scope in
+      let else_ =
+        match peek st with
+        | Id "else" -> ignore (next st); block st scope
+        | _ -> []
+      in
+      [ If_bit { field; idx; level; then_; else_ } ]
   | Id "repeat" ->
       ignore (next st);
       let var = ident st in
@@ -289,6 +318,11 @@ let top st =
       let value = level st in
       kw st "from";
       st.decls <- st.decls @ [ Lit { name; value; owner = ident st } ]
+  | Id "derived" ->
+      ignore (next st);
+      let name = ident st in
+      kw st "from";
+      st.decls <- st.decls @ [ Derived { name; owner = ident st } ]
   | Id "time" ->
       ignore (next st);
       let rec names acc =
@@ -351,4 +385,7 @@ let program_of_file path =
 
 let roles (prog : Relwire.program) =
   List.sort_uniq compare
-    (List.map (function Field { owner; _ } | Time { owner; _ } | Lit { owner; _ } -> owner) prog.decls)
+    (List.map
+       (function
+         | Field { owner; _ } | Time { owner; _ } | Lit { owner; _ } | Derived { owner; _ } -> owner)
+       prog.decls)

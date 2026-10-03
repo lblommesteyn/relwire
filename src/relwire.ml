@@ -54,6 +54,9 @@ type decl =
   (* A fixed bit (framing, e.g. STOP's low phase). Suppliers drive it,
      observers check it. *)
   | Lit of { name : string; value : level; owner : role }
+  (* A checked bit whose value a branch computes from wire history
+     (e.g. a stuff bit = complement of the last bit on the wire). *)
+  | Derived of { name : string; owner : role }
 
 (* Constraint endpoints: an edge (by time variable) or a Put onto a wire. *)
 type event_ref = At of string | Change of string
@@ -79,6 +82,11 @@ type stmt =
      ones are blanked), binds the bit to the new level, and re-anchors. *)
   | Toggle of { wire : string; field : string; idx : index; time : string;
                 nominal : int; min_after : int; max_after : int }
+  (* Branches may only test what every role has already sampled, so every
+     specialization takes the same path. Checked in [specialize]. *)
+  | If_run of { wire : string; n : int; set : string option; body : stmt list }
+  | If_bit of { field : string; idx : index; level : level;
+                then_ : stmt list; else_ : stmt list }
 
 type program = {
   wires : wire_spec list;
@@ -100,11 +108,19 @@ type instr =
   | IAfter of { time : string; ticks : int }
   | IToggle of { wire : string; field : string; bit : int; time : string; role : role;
                  own : own; nominal : int; min_after : int; max_after : int }
+  | IBranch of { cond : cond; skip : int }  (* false: skip the next [skip] *)
+  | IJump of int
+
+and cond =
+  | Run of { wire : string; n : int; set : string option }
+      (* last [n] samples on [wire] are equal; [set] := their complement *)
+  | Bit of { field : string; bit : int; level : level }
 
 let owner_of prog name =
   List.find_map
     (function
-      | Field { name = n; owner; _ } | Time { name = n; owner } | Lit { name = n; owner; _ } ->
+      | Field { name = n; owner; _ } | Time { name = n; owner } | Lit { name = n; owner; _ }
+      | Derived { name = n; owner } ->
           if n = name then Some owner else None)
     prog.decls
   |> function
@@ -121,31 +137,59 @@ let specialize prog assignment =
     | Const n -> n
     | Loop v -> List.assoc v env
   in
-  let rec go env stmts =
-    List.concat_map
-      (function
-        | Edge { wire; level; time; min_after; max_after } ->
-            let role = owner_of prog time in
-            [ IEdge { wire; level; time; role; own = own_of role; min_after; max_after } ]
-        | Put { wire; field; idx } ->
-            let role = owner_of prog field in
-            [ IPut { wire; field; bit = ix env idx; role; own = own_of role; inv = false } ]
-        | Put_not { wire; field; idx } ->
-            let role = owner_of prog field in
-            [ IPut { wire; field; bit = ix env idx; role; own = own_of role; inv = true } ]
-        | Toggle { wire; field; idx; time; nominal; min_after; max_after } ->
-            let role = owner_of prog field in
-            [ IToggle { wire; field; bit = ix env idx; time; role; own = own_of role;
-                        nominal; min_after; max_after } ]
-        | Sample { wire; field; idx } ->
-            let role = owner_of prog field in
-            [ ISample { wire; field; bit = ix env idx; role; own = own_of role } ]
-        | After { time; ticks } -> [ IAfter { time; ticks } ]
-        | Repeat { var; count; body } ->
-            List.concat (List.init count (fun i -> go ((var, i) :: env) body)))
-      stmts
+  (* [sampled]: field bits bound on every path so far (the branch lint). *)
+  let rec go env sampled stmts =
+    List.fold_left
+      (fun (acc, sampled) st ->
+        let out, sampled = one env sampled st in
+        (acc @ out, sampled))
+      ([], sampled) stmts
+  and one env sampled = function
+    | Edge { wire; level; time; min_after; max_after } ->
+        let role = owner_of prog time in
+        ([ IEdge { wire; level; time; role; own = own_of role; min_after; max_after } ], sampled)
+    | Put { wire; field; idx } ->
+        let role = owner_of prog field in
+        ([ IPut { wire; field; bit = ix env idx; role; own = own_of role; inv = false } ], sampled)
+    | Put_not { wire; field; idx } ->
+        let role = owner_of prog field in
+        ([ IPut { wire; field; bit = ix env idx; role; own = own_of role; inv = true } ], sampled)
+    | Toggle { wire; field; idx; time; nominal; min_after; max_after } ->
+        let role = owner_of prog field in
+        let bit = ix env idx in
+        ( [ IToggle { wire; field; bit; time; role; own = own_of role;
+                      nominal; min_after; max_after } ],
+          (field, bit) :: sampled )
+    | Sample { wire; field; idx } ->
+        let role = owner_of prog field in
+        let bit = ix env idx in
+        ([ ISample { wire; field; bit; role; own = own_of role } ], (field, bit) :: sampled)
+    | After { time; ticks } -> ([ IAfter { time; ticks } ], sampled)
+    | Repeat { var; count; body } ->
+        let rec loop i acc sampled =
+          if i = count then (acc, sampled)
+          else
+            let out, sampled = go ((var, i) :: env) sampled body in
+            loop (i + 1) (acc @ out) sampled
+        in
+        loop 0 [] sampled
+    | If_run { wire; n; set; body } ->
+        let b, _ = go env sampled body in
+        (IBranch { cond = Run { wire; n; set }; skip = List.length b } :: b, sampled)
+    | If_bit { field; idx; level; then_; else_ } ->
+        let bit = ix env idx in
+        if not (List.mem (field, bit) sampled) then
+          failwith
+            (Printf.sprintf "branch on %s[%d] before every role has sampled it" field bit);
+        let t, st = go env sampled then_ and e, se = go env sampled else_ in
+        let both = List.filter (fun x -> List.mem x se) st in
+        let cond = Bit { field; bit; level } in
+        if e = [] then (IBranch { cond; skip = List.length t } :: t, sampled)
+        else
+          ( (IBranch { cond; skip = List.length t + 1 } :: t) @ (IJump (List.length e) :: e),
+            both )
   in
-  Array.of_list (go [] prog.body)
+  Array.of_list (fst (go [] [] prog.body))
 
 (* ---------- machine ---------- *)
 
@@ -172,6 +216,7 @@ type agent = {
   mutable demoted : role list;
   drives : (string, drive) Hashtbl.t;
   env : (string, level option array) Hashtbl.t;
+  hist : (string, level list) Hashtbl.t;  (* samples per wire, newest first *)
   mutable events : event list;
   lits : (string * unit) list;
   clock : float;  (* this agent's tick length relative to nominal *)
@@ -190,14 +235,18 @@ let make_agent ?(clock = 1.0) ?(in_sync = 0) ?(out_delay = 0) ~name prog assignm
            | None -> ());
           Hashtbl.replace env name a
       | Lit { name; value; _ } -> Hashtbl.replace env name [| Some value |]
+      | Derived { name; _ } -> Hashtbl.replace env name [| None |]
       | Time _ -> ())
     prog.decls;
   { aname = name; machine = specialize prog assignment;
     specs = List.map (fun w -> (w.name, w)) prog.wires;
     pc = 0; phase = Ready; anchor = 0; demoted = [];
-    drives = Hashtbl.create 4; env; events = [];
+    drives = Hashtbl.create 4; env; hist = Hashtbl.create 4; events = [];
     clock; in_sync; out_delay;
-    lits = List.filter_map (function Lit { name; _ } -> Some (name, ()) | _ -> None) prog.decls }
+    lits =
+      List.filter_map
+        (function Lit { name; _ } | Derived { name; _ } -> Some (name, ()) | _ -> None)
+        prog.decls }
 
 let log a tick outcome var bit = a.events <- { tick; outcome; var; bit } :: a.events
 
@@ -229,6 +278,11 @@ let step a ~tick ~now ~prev =
          a.pc <- a.pc + 1
      | ISample { wire; field; bit; role; own } ->
          let cell = Hashtbl.find a.env field in
+         (match now wire with
+          | V lv ->
+              Hashtbl.replace a.hist wire
+                (lv :: Option.value (Hashtbl.find_opt a.hist wire) ~default:[])
+          | _ -> ());
          (match (now wire, effective a role own) with
           | V lv, Supplied ->
               if cell.(bit) = Some lv then log a tick Match field bit
@@ -244,6 +298,22 @@ let step a ~tick ~now ~prev =
               | _ -> cell.(bit) <- Some lv)
           | (Float | Contention), _ -> log a tick Bad_wire field bit);
          a.pc <- a.pc + 1
+     | IBranch { cond; skip } ->
+         let taken =
+           match cond with
+           | Bit { field; bit; level } -> (Hashtbl.find a.env field).(bit) = Some level
+           | Run { wire; n; set } -> (
+               let h = Option.value (Hashtbl.find_opt a.hist wire) ~default:[] in
+               match List.filteri (fun i _ -> i < n) h with
+               | x :: rest when List.length rest = n - 1 && List.for_all (( = ) x) rest ->
+                   Option.iter
+                     (fun f -> (Hashtbl.find a.env f).(0) <- Some (if x = L0 then L1 else L0))
+                     set;
+                   true
+               | _ -> false)
+         in
+         a.pc <- a.pc + (if taken then 1 else skip + 1)
+     | IJump n -> a.pc <- a.pc + n + 1
      | IAfter { ticks; _ } ->
          if tick >= a.anchor + scaled a ticks then begin
            a.anchor <- tick; a.pc <- a.pc + 1
@@ -456,7 +526,8 @@ let schedule ?(io = ideal_io) prog assignment =
             push { label = At time; wire = None; base = !anchor;
                    off = { lo = ticks; hi = Some ticks }; delta = (0, 0);
                    is_edge = true; mine = true }
-      | ISample _ -> ())
+      | ISample _ -> ()
+      | IBranch _ | IJump _ -> failwith "certify: branching programs are not supported yet")
     (specialize prog assignment);
   Array.of_list (List.rev !evs)
 
