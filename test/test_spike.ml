@@ -174,5 +174,42 @@ let () =
   ignore (simulate ~wires:(tiny 20).wires ~agents:[ q ] ~ticks:100 ());
   check "silent bus with 20-tick window -> Deadline_missed" (outcomes q Deadline_missed <> []);
 
+  print_endline "10. UART: same frame program as transmitter, receiver, sniffer";
+  let lsb_first = "10110010" (* 0x4D *) in
+  let uart_run ?(clock = 1.0) ?(mutate_tr = fun t -> t) () =
+    let tx = make_agent ~name:"TX" Uart.frame (Run_as [ "tx" ]) ~inputs:[ ("data", bits lsb_first) ] in
+    let rx = make_agent ~clock ~name:"RX" Uart.frame (Run_as [ "rx" ]) ~inputs:[] in
+    let tr = simulate ~wires:Uart.wires ~agents:[ tx ] ~ticks:1200 () in
+    ignore (simulate ~wires:Uart.wires ~agents:[ rx ] ~raw:[ replay (mutate_tr tr) Uart.wires ] ~ticks:1200 ());
+    (tx, rx)
+  in
+  let tx, rx = uart_run () in
+  check "receiver decodes the byte" (field_value rx "data" = lsb_first);
+  check "no mismatches, both finished"
+    (outcomes rx Mismatch = [] && outcomes tx Arbitration_lost = [] && done_ rx && done_ tx);
+  let _, rx3 = uart_run ~clock:1.03 () in
+  let _, rx3s = uart_run ~clock:0.97 () in
+  check "receiver clock +/-3% still decodes"
+    (List.for_all (fun r -> field_value r "data" = lsb_first && outcomes r Mismatch = []) [ rx3; rx3s ]);
+  let _, rx8 = uart_run ~clock:1.08 () in
+  check "receiver clock +8% fails visibly (wrong data or Mismatch)"
+    (field_value rx8 "data" <> lsb_first || outcomes rx8 Mismatch <> []);
+  let hold_low tr = List.map (fun (t, vs) -> (t, if t >= 900 then [ ("TXD", L0) ] else vs)) tr in
+  let _, rxb = uart_run ~mutate_tr:hold_low () in
+  check "line held low through stop bit -> framing Mismatch on stop_hi"
+    (List.exists (fun e -> e.var = "stop_hi") (outcomes rxb Mismatch));
+
+  print_endline "11. SPI mode 0: full duplex, one program";
+  let sc = make_agent ~name:"SC" Spi.exchange (Run_as [ "controller" ]) ~inputs:[ ("mosi", bits "10100101") ]
+  and st = make_agent ~name:"ST" Spi.exchange (Run_as [ "target" ]) ~inputs:[ ("miso", bits "00111100") ]
+  and so = make_agent ~name:"SO" Spi.exchange Observe_all ~inputs:[] in
+  ignore (simulate ~wires:Spi.wires ~agents:[ sc; st; so ] ~ticks:800 ());
+  check "target receives MOSI, controller receives MISO"
+    (field_value st "mosi" = "10100101" && field_value sc "miso" = "00111100");
+  check "sniffer sees both directions"
+    (field_value so "mosi" = "10100101" && field_value so "miso" = "00111100");
+  check "no violations, all finished"
+    (List.for_all (fun x -> clean x && outcomes x Arbitration_lost = [] && done_ x) [ sc; st; so ]);
+
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

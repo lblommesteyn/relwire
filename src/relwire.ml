@@ -69,6 +69,9 @@ type stmt =
   | Put of { wire : string; field : string; idx : index }
   | Sample of { wire : string; field : string; idx : index }
   | Repeat of { var : string; count : int; body : stmt list }
+  (* A time point fixed by the agreed rate, not by any wire: [ticks] after
+     the previous anchor. Every agent places it with its own timer. *)
+  | After of { time : string; ticks : int }
 
 type program = {
   wires : wire_spec list;
@@ -87,6 +90,7 @@ type instr =
                own : own; min_after : int; max_after : int }
   | IPut of { wire : string; field : string; bit : int; role : role; own : own }
   | ISample of { wire : string; field : string; bit : int; role : role; own : own }
+  | IAfter of { time : string; ticks : int }
 
 let owner_of prog name =
   List.find_map
@@ -120,6 +124,7 @@ let specialize prog assignment =
         | Sample { wire; field; idx } ->
             let role = owner_of prog field in
             [ ISample { wire; field; bit = ix env idx; role; own = own_of role } ]
+        | After { time; ticks } -> [ IAfter { time; ticks } ]
         | Repeat { var; count; body } ->
             List.concat (List.init count (fun i -> go ((var, i) :: env) body)))
       stmts
@@ -153,9 +158,10 @@ type agent = {
   env : (string, level option array) Hashtbl.t;
   mutable events : event list;
   lits : (string * unit) list;
+  clock : float;  (* this agent's tick length relative to nominal *)
 }
 
-let make_agent ~name prog assignment ~inputs =
+let make_agent ?(clock = 1.0) ~name prog assignment ~inputs =
   let env = Hashtbl.create 8 in
   List.iter
     (function
@@ -172,6 +178,7 @@ let make_agent ~name prog assignment ~inputs =
     specs = List.map (fun w -> (w.name, w)) prog.wires;
     pc = 0; phase = Ready; anchor = 0; demoted = [];
     drives = Hashtbl.create 4; env; events = [];
+    clock;
     lits = List.filter_map (function Lit { name; _ } -> Some (name, ()) | _ -> None) prog.decls }
 
 let log a tick outcome var bit = a.events <- { tick; outcome; var; bit } :: a.events
@@ -179,6 +186,8 @@ let log a tick outcome var bit = a.events <- { tick; outcome; var; bit } :: a.ev
 (* The one dynamic rule: losing authorship of data demotes the whole role. *)
 let effective a role own =
   if own = Supplied && List.mem role a.demoted then Observed else own
+
+let scaled a n = if n >= 1_000_000 then n else int_of_float (Float.round (float n /. a.clock))
 
 let release_all a = Hashtbl.filter_map_inplace (fun _ _ -> Some HighZ) a.drives
 
@@ -215,7 +224,13 @@ let step a ~tick ~now ~prev =
               | _ -> cell.(bit) <- Some lv)
           | (Float | Contention), _ -> log a tick Bad_wire field bit);
          a.pc <- a.pc + 1
+     | IAfter { ticks; _ } ->
+         if tick >= a.anchor + scaled a ticks then begin
+           a.anchor <- tick; a.pc <- a.pc + 1
+         end
+         else continue := false
      | IEdge { wire; level; time; role; own; min_after; max_after } -> (
+         let min_after = scaled a min_after and max_after = scaled a max_after in
          let finish () =
            a.anchor <- tick; a.phase <- Ready; a.pc <- a.pc + 1
          in
@@ -352,6 +367,10 @@ let schedule prog assignment =
           ignore
             (push { label = Change wire; base = !anchor; off = { lo = 1; hi = Some 1 };
                     is_edge = false; mine = own = Supplied })
+      | IAfter { time; ticks } ->
+          anchor :=
+            push { label = At time; base = !anchor; off = { lo = ticks; hi = Some ticks };
+                   is_edge = true; mine = true }
       | ISample _ -> ())
     (specialize prog assignment);
   Array.of_list (List.rev !evs)
