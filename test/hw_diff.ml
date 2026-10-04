@@ -47,7 +47,7 @@ let scenario name prog ~ticks (cores : (assignment * (string * string) list) lis
       cores
   in
   let fresh = mk () in
-  Hw.write_case dir prog fresh;
+  let compiled = Hw.write_case dir prog fresh in
   let agents = List.map snd fresh in
   let tr = simulate ~wires:prog.wires ~agents ~ticks () in
   run
@@ -84,7 +84,7 @@ let scenario name prog ~ticks (cores : (assignment * (string * string) list) lis
            let ok = ref true in
            Array.iteri
              (fun b v ->
-               let nib = int_of_string ("0x" ^ String.make 1 hw.[31 - (b / 4)]) in
+               let nib = int_of_string ("0x" ^ String.make 1 hw.[(Hw.dw / 4) - 1 - (b / 4)]) in
                let hb = if (nib lsr (b mod 4)) land 1 = 1 then L1 else L0 in
                match v with Some l when l <> hb -> ok := false | _ -> ())
              model;
@@ -93,7 +93,10 @@ let scenario name prog ~ticks (cores : (assignment * (string * string) list) lis
          agents)
   in
   let nev = List.length hw_ev in
-  check (Printf.sprintf "%s: %d ticks, %d events: bus, events, data memory agree" name ticks nev)
+  let words = Array.length compiled.Hw.words in
+  check
+    (Printf.sprintf "%s: %d ticks, %d events, one %d-instr binary: bus, events, data memory agree"
+       name ticks nev words)
     (tr_ok && ev_ok && dm_ok && nev > 0)
 
 let () =

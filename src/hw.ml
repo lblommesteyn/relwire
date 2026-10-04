@@ -1,8 +1,9 @@
-(* Encoder for the RPM core (hw/rpm_core.v, ISA v0) and file glue for the
+(* Compiler for the RPM core (hw/rpm_core.v, ISA v1) and file glue for the
    differential test harness (hw/tb.v). *)
 open Relwire
 
 let inf = 0xFFFF
+let dw = 64 (* data-memory bits per core *)
 
 (* Data-memory layout: fields, literals and derived bits in declaration order. *)
 let layout prog =
@@ -21,59 +22,144 @@ let wire_index prog w =
   in
   go 0 prog.wires
 
-let imm n = if n >= inf then inf else n
+(* ---------- ISA v1 compiler ----------
 
-let encode prog assignment =
+   Compiles the source AST (not the unrolled machine) for one role: the
+   outermost repeat becomes a zero-overhead LOOP whose loop variable indexes
+   data addresses; deeper repeats are unrolled. Timing values go to an
+   8-entry constant table. [specialize] still runs first as the lint. *)
+
+type compiled = { words : int array; consts : int array }
+
+(* Role index of each owner, in the program's sorted role order. *)
+let role_ids prog =
+  let roles =
+    List.sort_uniq compare
+      (List.map
+         (function Field { owner; _ } | Time { owner; _ } | Lit { owner; _ } | Derived { owner; _ } -> owner)
+         prog.decls)
+  in
+  if List.length roles > 4 then failwith "more than 4 roles";
+  List.mapi (fun i r -> (r, i)) roles
+
+(* The per-core register that replaces static specialization. *)
+let role_mask prog = function
+  | Observe_all -> 0
+  | Run_as rs ->
+      (* a role that owns nothing (a pure receiver) contributes no bit *)
+      List.fold_left
+        (fun m r -> match List.assoc_opt r (role_ids prog) with
+           | Some i -> m lor (1 lsl i) | None -> m)
+        0 rs
+
+(* One binary for every role: owned instructions carry their owner's role
+   id in [25:24] and bit 19 set; a core drives iff its mask has that role. *)
+let compile prog =
+  List.iter (fun (r, _) -> ignore (specialize prog (Run_as [ r ]))) (role_ids prog);
+  let rid = role_ids prog in
+  let own_of role = Some (List.assoc role rid) in
   let lay = layout prog in
-  let addr f bit = List.assoc f lay + bit in
+  let base f = List.assoc f lay in
   let is_lit f =
     List.exists (function Lit { name; _ } | Derived { name; _ } -> name = f | _ -> false) prog.decls
   in
-  let word ~op ?(sup = false) ?(wire = 0) ?(lvl = false) ?(lit = false) ?(ad = 0)
-      ?(a = 0) ?(b = 0) ?(c = 0) () =
-    let open Int64 in
-    let f v sh = shift_left (of_int v) sh in
-    List.fold_left logor 0L
-      [ f op 60; f (Bool.to_int sup) 59; f wire 57; f (Bool.to_int lvl) 56;
-        f (Bool.to_int lit) 55; f ad 48; f (imm a) 32; f (imm b) 16; f (imm c) 0 ]
+  let consts = ref [] in
+  let clamp v = if v >= inf then inf else v in
+  let find_seq vs =
+    let arr = Array.of_list !consts in
+    let n = Array.length arr and m = List.length vs in
+    let rec at i =
+      if i + m > n then None
+      else if List.for_all2 (fun j v -> arr.(i + j) = v) (List.init m Fun.id) vs then Some i
+      else at (i + 1)
+    in
+    at 0
   in
-  let sup o = o = Supplied in
-  let words =
-    Array.map
-      (function
-        | IEdge { wire; level; own; min_after; max_after; _ } ->
-            word ~op:1 ~sup:(sup own) ~wire:(wire_index prog wire) ~lvl:(level = L1)
-              ~a:min_after ~b:max_after ()
-        | IPut { wire; field; bit; own; inv; _ } ->
-            word ~op:2 ~sup:(sup own) ~wire:(wire_index prog wire) ~lvl:inv ~ad:(addr field bit) ()
-        | ISample { wire; field; bit; own; _ } ->
-            word ~op:3 ~sup:(sup own) ~wire:(wire_index prog wire) ~lit:(is_lit field)
-              ~ad:(addr field bit) ()
-        | IAfter { ticks; _ } -> word ~op:4 ~a:ticks ()
-        | IToggle { wire; field; bit; own; nominal; min_after; max_after; _ } ->
-            word ~op:5 ~sup:(sup own) ~wire:(wire_index prog wire) ~ad:(addr field bit)
-              ~a:nominal ~b:min_after ~c:max_after ()
-        | IBranch { cond = Run { wire; n; set }; skip } ->
-            word ~op:6 ~wire:(wire_index prog wire) ~lit:(set <> None)
-              ~ad:(match set with Some f -> addr f 0 | None -> 0) ~a:n ~b:skip ()
-        | IBranch { cond = Bit { field; bit; level }; skip } ->
-            word ~op:7 ~lvl:(level = L1) ~ad:(addr field bit) ~b:skip ()
-        | IJump n -> word ~op:8 ~b:n ())
-      (specialize prog assignment)
+  let const_seq vs =
+    let vs = List.map clamp vs in
+    match find_seq vs with
+    | Some i -> i
+    | None ->
+        let i = List.length !consts in
+        consts := !consts @ vs;
+        if List.length !consts > 8 then failwith "more than 8 distinct timing constants";
+        i
   in
-  Array.append words [| 0L |]
+  let k v = const_seq [ v ] in
+  let w = wire_index prog in
+  let hdr op owner wire lvl =
+    let o = match owner with Some r -> (r lsl 24) lor (1 lsl 19) | None -> 0 | _ -> 0 in
+    o lor (op lsl 20) lor (wire lsl 17) lor (Bool.to_int lvl lsl 16)
+  in
+  (* env: unrolled loop variables; lv: the hardware loop variable, if any *)
+  let resolve env lv field idx =
+    match idx with
+    | Const n -> (base field + n, false)
+    | Loop v when Some v = lv -> (base field, true)
+    | Loop v -> (base field + List.assoc v env, false)
+  in
+  let mem lit ix ad = (Bool.to_int lit lsl 15) lor (Bool.to_int ix lsl 14) lor (ad lsl 7) in
+  let rec go env lv stmts = List.concat_map (one env lv) stmts
+  and one env lv = function
+    | Edge { wire; level; time; min_after; max_after } ->
+        [ hdr 1 (own_of (owner_of prog time)) (w wire) (level = L1)
+          lor (k min_after lsl 13) lor (k max_after lsl 10) ]
+    | Put { wire; field; idx } | Put_not { wire; field; idx } as st ->
+        let ad, ix = resolve env lv field idx in
+        let inv = match st with Put_not _ -> true | _ -> false in
+        [ hdr 2 (own_of (owner_of prog field)) (w wire) inv lor mem false ix ad ]
+    | Sample { wire; field; idx } ->
+        let ad, ix = resolve env lv field idx in
+        [ hdr 3 (own_of (owner_of prog field)) (w wire) false lor mem (is_lit field) ix ad ]
+    | After { ticks; _ } -> [ hdr 4 None 0 false lor (k ticks lsl 13) ]
+    | Toggle { wire; field; idx; nominal; min_after; max_after; _ } ->
+        let ad, ix = resolve env lv field idx in
+        let kk = const_seq [ nominal; min_after; max_after ] in
+        if kk > 5 then failwith "toggle constant triple does not fit";
+        [ hdr 5 (own_of (owner_of prog field)) (w wire) false lor mem false ix ad lor kk ]
+    | Repeat { var; count; body } when lv = None ->
+        let b = go env (Some var) body in
+        if count > 255 || List.length b > 255 then failwith "loop too large";
+        (hdr 9 None 0 false lor (count lsl 8) lor List.length b) :: b
+    | Repeat { var; count; body } ->
+        List.concat (List.init count (fun i -> go ((var, i) :: env) lv body))
+    | If_run { wire; n; set; body } ->
+        let b = go env lv body in
+        if List.length b > 31 || n > 7 then failwith "if_run body too large";
+        let set_bits = match set with
+          | Some f -> (1 lsl 12) lor (base f lsl 5) | None -> 0 in
+        (hdr 6 None (w wire) false lor (n lsl 13) lor set_bits lor List.length b) :: b
+    | If_bit { field; idx; level; then_; else_ } ->
+        let ad, ix = resolve env lv field idx in
+        let t = go env lv then_ and e = go env lv else_ in
+        if e = [] then (hdr 7 None 0 (level = L1) lor mem false ix ad lor List.length t) :: t
+        else
+          ((hdr 7 None 0 (level = L1) lor mem false ix ad lor (List.length t + 1)) :: t)
+          @ ((hdr 8 None 0 false lor List.length e) :: e)
+  in
+  (match List.rev lay with
+   | (f, b) :: _ ->
+       let width = match List.find_opt (function Field { name; _ } -> name = f | _ -> false) prog.decls with
+         | Some (Field { width; _ }) -> width | _ -> 1 in
+       if b + width > dw then failwith "data memory overflow"
+   | [] -> ());
+  let words = Array.of_list (go [] None prog.body @ [ 0 ]) in
+  if Array.length words > 256 then failwith "program larger than 256 instructions";
+  let c = Array.make 8 0 in
+  List.iteri (fun i v -> c.(i) <- v) !consts;
+  { words; consts = c }
 
 let data_bits prog (a : agent) =
   let lay = layout prog in
-  let bits = Array.make 128 None in
+  let bits = Array.make dw None in
   List.iter
     (fun (name, base) -> Array.iteri (fun i v -> bits.(base + i) <- v) (Hashtbl.find a.env name))
     lay;
   bits
 
-let hex128 bits =
-  String.init 32 (fun k ->
-      let nib = 31 - k in
+let hex_data bits =
+  String.init (dw / 4) (fun k ->
+      let nib = (dw / 4) - 1 - k in
       let v = ref 0 in
       for j = 0 to 3 do
         if bits.(nib * 4 + j) = Some L1 then v := !v lor (1 lsl j)
@@ -108,17 +194,20 @@ let write_case dir prog (cores : (assignment * agent) list) =
          Printf.sprintf "%02x" (r lor (b lsl 4)))
        prog.wires
     @ List.init (4 - List.length prog.wires) (fun _ -> "20"));
-  List.iteri
-    (fun i (asg, _) ->
-      write_file (Filename.concat dir (Printf.sprintf "prog%d.hex" i))
-        (Array.to_list (Array.map (Printf.sprintf "%016Lx") (encode prog asg))))
-    cores;
-  for i = List.length cores to 3 do
-    write_file (Filename.concat dir (Printf.sprintf "prog%d.hex" i)) [ "0000000000000000" ]
-  done;
+  let c = compile prog in
+  write_file (Filename.concat dir "prog.hex")
+    (Array.to_list (Array.map (Printf.sprintf "%07x") c.words));
+  (* cores beyond the scenario get mask 0 and an empty data memory; they
+     run as silent observers *)
+  write_file (Filename.concat dir "roles.hex")
+    (List.map (fun (asg, _) -> Printf.sprintf "%x" (role_mask prog asg)) cores
+    @ List.init (4 - List.length cores) (fun _ -> "0"));
   write_file (Filename.concat dir "data.hex")
-    (List.map (fun (_, a) -> hex128 (data_bits prog a)) cores
-    @ List.init (4 - List.length cores) (fun _ -> String.make 32 '0'))
+    (List.map (fun (_, a) -> hex_data (data_bits prog a)) cores
+    @ List.init (4 - List.length cores) (fun _ -> String.make (dw / 4) '0'));
+  write_file (Filename.concat dir "consts.hex")
+    (Array.to_list (Array.map (Printf.sprintf "%04x") c.consts));
+  c
 
 let trace_lines prog (tr : trace) =
   List.map

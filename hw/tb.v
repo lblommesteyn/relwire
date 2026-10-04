@@ -1,5 +1,6 @@
 // Differential-test harness: up to 4 rpm_cores on a shared bus of 4 wires.
-// Files in +dir=: cfg.hex (per wire: res, bias), prog<i>.hex, data<i>.hex.
+// Files in +dir=: cfg.hex (per wire: res, bias), prog.hex (shared), roles.hex,
+// data.hex, consts.hex.
 // Writes trace.txt (bus per tick), events.txt, dmem.txt.
 `timescale 1ns / 1ps
 module tb;
@@ -11,8 +12,10 @@ module tb;
   reg [2:0] ph = 0;
   reg [15:0] tick = 0;
   reg [NW-1:0] now = 0, prev = 0;
-  reg [63:0] imem0[0:1023], imem1[0:1023], imem2[0:1023], imem3[0:1023];
-  reg [127:0] dinit[0:NC-1];
+  reg [25:0] imem[0:255];  // one program for every core
+  reg [3:0] masks[0:NC-1];
+
+  reg [63:0] dinit[0:NC-1];
   reg [7:0] cfg[0:NW-1];  // {bias[3:0], res[3:0]}; bias 0 low 1 high 2 float
   wire [2*NW-1:0] res;
   genvar g;
@@ -24,21 +27,24 @@ module tb;
 
   wire [NW-1:0] oe[0:NC-1], out[0:NC-1];
   reg [NW-1:0] poe[0:NC-1], pout[0:NC-1];
-  wire [9:0] pc[0:NC-1];
+  wire [7:0] pc[0:NC-1];
   wire ev_valid[0:NC-1];
   wire [2:0] ev_code[0:NC-1];
   wire [6:0] ev_addr[0:NC-1];
   wire halted[0:NC-1];
-  wire [127:0] dmem[0:NC-1];
+  wire [63:0] dmem[0:NC-1];
+  reg [15:0] kt[0:7];  // the shared constant table
+  wire [2:0] ksa[0:NC-1], ksb[0:NC-1];
 
   generate
     for (g = 0; g < NC; g = g + 1) begin : core
       rpm_core #(.NW(NW)) u (
           .clk(clk), .rst(rst), .exec_en(ph >= 2), .tick(tick), .now(now), .prev(prev),
           .res(res),
-          .instr(g == 0 ? imem0[pc[g]] : g == 1 ? imem1[pc[g]] : g == 2 ? imem2[pc[g]] : imem3[pc[g]]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
+          .instr(imem[pc[g]]), .role_mask(masks[g]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
           .ev_valid(ev_valid[g]), .ev_code(ev_code[g]), .ev_addr(ev_addr[g]),
-          .halted(halted[g]), .dmem_we(rst), .dmem_wdata(dinit[g]), .dmem(dmem[g]));
+          .halted(halted[g]), .ksel_a(ksa[g]), .ksel_b(ksb[g]), .ka(kt[ksa[g]]),
+          .kb(kt[ksb[g]]), .load(rst), .dmem_wdata(dinit[g]), .dmem(dmem[g]));
     end
   endgenerate
 
@@ -75,11 +81,10 @@ module tb;
     if (!$value$plusargs("ticks=%d", ticks)) ticks = 1000;
     if (!$value$plusargs("wires=%d", nwires)) nwires = NW;
     $readmemh({dir, "/cfg.hex"}, cfg);
-    $readmemh({dir, "/prog0.hex"}, imem0);
-    $readmemh({dir, "/prog1.hex"}, imem1);
-    $readmemh({dir, "/prog2.hex"}, imem2);
-    $readmemh({dir, "/prog3.hex"}, imem3);
+    $readmemh({dir, "/prog.hex"}, imem);
+    $readmemh({dir, "/roles.hex"}, masks);
     $readmemh({dir, "/data.hex"}, dinit);
+    $readmemh({dir, "/consts.hex"}, kt);
     for (c = 0; c < NC; c = c + 1) begin
       poe[c] = 0;
       pout[c] = 0;

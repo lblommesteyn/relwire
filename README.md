@@ -52,20 +52,32 @@ arbitration, stuff-error detection), I2C read-or-write on the R/W bit, the timin
 and without io delays, and the `.rw` sources checked against the OCaml-built
 programs.
 
-### Hardware (ISA v0)
+### Hardware (ISA v1)
 
-`hw/rpm_core.v` executes a specialized instruction stream (64-bit words, encoder in
-`src/hw.ml`). `test/hw_diff.ml` runs eight scenarios (I2C arbitration, write, read
-branch, SPI, UART, Manchester, CAN stuffing, CAN arbitration) on both the reference
-model and the RTL under iverilog, and requires them to agree tick for tick on the
-bus, event for event per core, and bit for bit in data memory. A planted bug
-(stuff bit not complemented) is caught at the first stuff bit.
+`hw/rpm_core.v` runs compiled RelWire (`src/hw.ml`): 26-bit instructions, one
+level of zero-overhead loop with an index register, timing values in an
+8-entry constant table shared by all cores (a program's speed is data, not
+code), 64-bit data memory.
 
-Yosys against IHP sg13g2 (typ): **1,919 cells, 210 flops, 27,700 um2** per core
-(about one 200x150 um tile before utilization), 128 of those flops are data
-memory. Instruction memory is the real constraint: CAN is 418 instructions
-unrolled (26.8 kbit at 64 bits each), 98 with hardware loops. Next: loops,
-a narrower encoding, and SRAM for instructions.
+**One binary per protocol.** Owned instructions carry their owner's role id;
+each core has a 4-bit role mask. Controller, target and sniffer run the same
+instructions and differ only in that register.
+
+`test/hw_diff.ml` runs eight scenarios (I2C arbitration, write, read branch, SPI,
+UART, Manchester, CAN stuffing, CAN arbitration) on the reference model
+(interpreting the unrolled machine) and on the RTL under iverilog (executing the
+looped binary). They must agree tick for tick on the bus, event for event per
+core, and bit for bit in data memory. Planted bugs (stuff bit not complemented;
+loop one iteration short) are caught.
+
+| | v0 | v1 |
+|---|---|---|
+| CAN binary | 418 x 64 bit, per role | 94 x 26 bit, shared |
+| I2C write binary | 78 x 64 bit, per role | 25 x 26 bit, shared |
+| core (Yosys, sg13g2 typ) | 1,919 cells, 27.7k um2 | 2,102 cells, 27.7k um2 |
+
+Every program fits a 256x32 IHP SRAM macro (`RM_IHPSG13_1P_256x32`, 416.6 x
+118.8 um).
 
 Open questions: a data override demotes the whole role while a time override
 flips only that edge; the certificate does not handle branching programs yet;
