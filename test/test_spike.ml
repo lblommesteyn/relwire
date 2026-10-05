@@ -388,7 +388,7 @@ let () =
     (match specialize early (Run_as [ "controller" ]) with
      | _ -> false
      | exception Failure _ -> true);
-  check "can.rw = Can.frame" (Rw_parse.program_of_file "../examples/can.rw" = Can.frame);
+  check "can.rw = Can.frame" ({ (Rw_parse.program_of_file "../examples/can.rw") with constraints = [] } = Can.frame);
   let rw = Rw_parse.program_of_file "../examples/i2c_rw.rw" in
   let run_rw addr =
     let c = make_agent ~name:"C" rw (Run_as [ "controller" ])
@@ -408,6 +408,26 @@ let () =
     (field_value c "rdata" = "00110101" && field_value o "rack" = "1"
      && field_value o "wdata" = "????????"
      && List.for_all (fun x -> clean x && outcomes x Mismatch = [] && done_ x) [ c; t; o ]);
+
+  print_endline "17. certificates over branching programs";
+  let rwp = Rw_parse.program_of_file "../examples/i2c_rw.rw" in
+  let crw = certify rwp (Run_as [ "controller" ]) in
+  print_certificate "  i2c_rw.rw, role controller (both R/W arms)" crw;
+  let lw = certify wt (Run_as [ "controller" ]) in
+  let g n ls = (List.find (fun l -> l.constr.cname = n) ls).guaranteed in
+  check "read-or-write passes on both arms" (List.for_all (fun l -> l.pass) crw);
+  check "same tLOW/tHIGH guarantee as the write-only program"
+    (g "tLOW" crw = g "tLOW" lw && g "tHIGH" crw = g "tHIGH" lw);
+  check "the read arm's data comes from the target: tSU;DAT assumes peer"
+    ((List.find (fun l -> l.constr.cname = "tSU;DAT") crw).assumes_peer);
+  let canp = Rw_parse.program_of_file "../examples/can.rw" in
+  let ccan = certify canp (Run_as [ "tx" ]) in
+  print_certificate "  can.rw, role tx (stuffed and unstuffed paths)" ccan;
+  check "CAN bit timing exact on every path: bit = 100, seg1 = 75, seg2 = 25"
+    (g "bit" ccan = { lo = 100; hi = Some 100 } && g "tSEG1" ccan = { lo = 75; hi = Some 75 }
+     && g "tSEG2" ccan = { lo = 25; hi = Some 25 });
+  let bad = { canp with constraints = [ { cname = "bit"; from_ = At "boundary"; to_ = At "boundary"; min_ticks = 101 } ] } in
+  check "and a 101-tick bit requirement fails" (not (List.hd (certify bad (Run_as [ "tx" ]))).pass);
 
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

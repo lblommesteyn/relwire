@@ -56,3 +56,8 @@ protocol {
   use plain(recessive, 0)     # ACK delimiter
   repeat i 7  { use plain(recessive, 0) }
 }
+
+# Bit timing must hold on every path, stuffed or not.
+constraint "bit":      boundary -> boundary >= seg1 + seg2
+constraint "tSEG1":    boundary -> sample   >= seg1
+constraint "tSEG2":    sample   -> boundary >= seg2

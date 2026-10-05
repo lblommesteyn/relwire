@@ -43,3 +43,10 @@ protocol {
   sample SDA stop_lo[0]
   edge   SDA -> 1 @stop in [t_su_sto, inf]
 }
+
+constraint "tHD;STA": start      -> scl_fall >= t_hd_sta
+constraint "tLOW":    scl_fall   -> scl_rise >= t_low
+constraint "tHIGH":   scl_rise   -> scl_fall >= t_high
+constraint "tSU;DAT": change SDA -> scl_rise >= 5
+constraint "tHD;DAT": scl_fall   -> change SDA >= 0
+constraint "tSU;STO": scl_rise   -> stop >= t_su_sto

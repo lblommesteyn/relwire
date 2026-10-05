@@ -274,7 +274,14 @@ let endpoint st =
   | Id "change" -> ignore (next st); Change (wire_ref st)
   | Id x ->
       ignore (next st);
-      if not (declared_time st x) then err st ("undeclared time " ^ x);
+      let rec marks = function
+        | After { time; _ } | Toggle { time; _ } -> time = x
+        | Repeat { body; _ } | If_run { body; _ } -> List.exists marks body
+        | If_bit { then_; else_; _ } -> List.exists marks (then_ @ else_)
+        | _ -> false
+      in
+      let is_mark = match st.body with Some b -> List.exists marks b | None -> false in
+      if not (declared_time st x || is_mark) then err st ("undeclared time " ^ x);
       At x
   | t -> err st (Printf.sprintf "expected an event, found '%s'" (show t))
 

@@ -471,8 +471,8 @@ let outcomes a o = List.filter (fun e -> e.outcome = o) (List.rev a.events)
      - observed edge:           the program's window [min, max]
      - put:                     at its anchor; reaches the bus 1 + out later
    Supplied and observed edges are seen [sync, sync + jitter] after the bus.
-   Distances along the anchor chain are summed as intervals, so a stretched
-   rise leaves the following fall's offset exact. *)
+   Distances along each path are summed as intervals, so a stretched rise
+   leaves the following fall's offset exact. *)
 
 type bound = { lo : int; hi : int option }
 
@@ -480,23 +480,30 @@ type io = { sync : int; out : int; skew : int; jitter : int }
 
 let ideal_io = { sync = 0; out = 0; skew = 0; jitter = 0 }
 
+(* Events form a DAG over control flow: a branch gives an event several
+   successors. Each node's [off] is its distance from the previous event
+   on the path (puts sit at their anchor, so theirs is 0). A constraint is
+   checked on every path from a [from] event to the next [to] event. *)
 type tev = {
   label : event_ref;
   wire : string option;
-  base : int;
   off : bound;
   delta : int * int;
-  is_edge : bool;
   mine : bool;
+  mutable succ : int list;
 }
 
 let schedule ?(io = ideal_io) prog assignment =
-  let evs = ref [] and n = ref 0 and anchor = ref (-1) in
-  let push e = evs := e :: !evs; incr n; !n - 1 in
+  let m = specialize prog assignment in
+  let n = Array.length m in
+  let node_of = Array.make n (-1) in
+  let evs = ref [] and k = ref 0 in
   let lat = 1 + io.out + io.sync in
   let seen_mine = (-io.sync, -io.sync) and seen_peer = (-io.sync - io.jitter, -io.sync) in
-  Array.iter
-    (function
+  let push pc e = node_of.(pc) <- !k; incr k; evs := e :: !evs in
+  Array.iteri
+    (fun pc ins ->
+      match ins with
       | IEdge { wire; level; time; own; min_after; max_after; _ } ->
           let spec = List.find (fun s -> s.name = wire) prog.wires in
           let off, delta =
@@ -507,51 +514,44 @@ let schedule ?(io = ideal_io) prog assignment =
                 then ({ lo = min_after + lat; hi = None }, seen_mine)
                 else ({ lo = min_after + lat; hi = Some (min_after + lat) }, seen_mine)
           in
-          anchor :=
-            push { label = At time; wire = Some wire; base = !anchor; off; delta;
-                   is_edge = true; mine = own = Supplied }
+          push pc { label = At time; wire = Some wire; off; delta; mine = own = Supplied; succ = [] }
       | IPut { wire; own; _ } ->
-          ignore
-            (push { label = Change wire; wire = Some wire; base = !anchor;
-                    off = { lo = 0; hi = Some 0 }; delta = (1 + io.out, 1 + io.out);
-                    is_edge = false; mine = own = Supplied })
+          push pc { label = Change wire; wire = Some wire; off = { lo = 0; hi = Some 0 };
+                    delta = (1 + io.out, 1 + io.out); mine = own = Supplied; succ = [] }
       | IToggle { wire; time; own; nominal; min_after; max_after; _ } ->
           let off, delta = match own with
             | Supplied -> ({ lo = nominal + lat; hi = Some (nominal + lat) }, seen_mine)
             | Observed -> ({ lo = min_after; hi = Some max_after }, seen_peer) in
-          anchor := push { label = At time; wire = Some wire; base = !anchor; off; delta;
-                           is_edge = true; mine = own = Supplied }
+          push pc { label = At time; wire = Some wire; off; delta; mine = own = Supplied; succ = [] }
       | IAfter { time; ticks } ->
-          anchor :=
-            push { label = At time; wire = None; base = !anchor;
-                   off = { lo = ticks; hi = Some ticks }; delta = (0, 0);
-                   is_edge = true; mine = true }
-      | ISample _ -> ()
-      | IBranch _ | IJump _ -> failwith "certify: branching programs are not supported yet")
-    (specialize prog assignment);
-  Array.of_list (List.rev !evs)
-
-(* Bus-time distance a -> b (a before b). Second component: relies on a
-   peer event. *)
-let distance ?(io = ideal_io) evs a b =
-  let ea = if evs.(a).is_edge then a else evs.(a).base in
-  let add x y = { lo = x.lo + y.lo;
-                  hi = (match (x.hi, y.hi) with Some p, Some q -> Some (p + q) | _ -> None) } in
-  let rec up i acc peer =
-    if i = ea then (acc, peer)
-    else up evs.(i).base (add acc evs.(i).off) (peer || not evs.(i).mine)
+          push pc { label = At time; wire = None; off = { lo = ticks; hi = Some ticks };
+                    delta = (0, 0); mine = true; succ = [] }
+      | ISample _ | IBranch _ | IJump _ -> ())
+    m;
+  let evs = Array.of_list (List.rev !evs) in
+  let flow pc =
+    match m.(pc) with
+    | IBranch { skip; _ } -> [ pc + 1; pc + 1 + skip ]
+    | IJump j -> [ pc + 1 + j ]
+    | _ -> [ pc + 1 ]
   in
-  let d, peer = up b { lo = 0; hi = Some 0 } false in
-  let off_a = if evs.(a).is_edge then 0 else evs.(a).off.lo in
-  let da_lo, da_hi = evs.(a).delta and db_lo, db_hi = evs.(b).delta in
-  let skew =
-    match (evs.(a).wire, evs.(b).wire) with
-    | Some x, Some y when x <> y -> io.skew
-    | _ -> 0
+  (* first event on each path starting at instruction [pc] *)
+  let memo = Hashtbl.create 64 in
+  let rec firsts pc =
+    if pc >= n then []
+    else if node_of.(pc) >= 0 then [ node_of.(pc) ]
+    else
+      match Hashtbl.find_opt memo pc with
+      | Some r -> r
+      | None ->
+          let r = List.sort_uniq compare (List.concat_map firsts (flow pc)) in
+          Hashtbl.replace memo pc r;
+          r
   in
-  ( { lo = d.lo - off_a + db_lo - da_hi - skew;
-      hi = Option.map (fun h -> h - off_a + db_hi - da_lo + skew) d.hi },
-    peer || not evs.(a).mine )
+  Array.iteri
+    (fun pc v -> if v >= 0 then evs.(v).succ <- List.sort_uniq compare (List.concat_map firsts (flow pc)))
+    node_of;
+  evs
 
 type cert_line = {
   constr : constr;
@@ -561,38 +561,48 @@ type cert_line = {
   pass : bool;
 }
 
+let join x y =
+  { lo = min x.lo y.lo;
+    hi = (match (x.hi, y.hi) with Some p, Some q -> Some (max p q) | _ -> None) }
+
 let certify ?(io = ideal_io) prog assignment =
   let evs = schedule ~io prog assignment in
+  let add x y = { lo = x.lo + y.lo;
+                  hi = (match (x.hi, y.hi) with Some p, Some q -> Some (p + q) | _ -> None) } in
   List.map
     (fun c ->
-      let acc = ref None and peer = ref false and k = ref 0 in
-      (* Pair each [from] with the next [to], unless another [from] comes first. *)
+      (* (from, to) pairs -> bus-time bound joined over every path *)
+      let pairs = Hashtbl.create 16 and peer = ref false in
       Array.iteri
         (fun a ea ->
           if ea.label = c.from_ then begin
-            let b = ref (a + 1) in
-            while !b < Array.length evs && evs.(!b).label <> c.to_
-                  && evs.(!b).label <> c.from_ do incr b done;
-            if !b < Array.length evs && evs.(!b).label = c.to_
-               && (ea.mine || evs.(!b).mine) then begin
-              let b = !b in
-              let d, p = distance ~io evs a b in
-              incr k;
-              peer := !peer || p;
-              acc :=
-                Some
-                  (match !acc with
-                   | None -> d
-                   | Some x ->
-                       { lo = min x.lo d.lo;
-                         hi = (match (x.hi, d.hi) with
-                               | Some p, Some q -> Some (max p q) | _ -> None) })
-            end
+            let rec walk v acc p =
+              let ev = evs.(v) in
+              (* a peer's zero-time put on the way cannot move the timing *)
+              let contributes = ev.off <> { lo = 0; hi = Some 0 } || ev.label = c.to_ in
+              let acc = add acc ev.off and p = p || (contributes && not ev.mine) in
+              if ev.label = c.to_ then begin
+                if ea.mine || ev.mine then begin
+                  let da_lo, da_hi = ea.delta and db_lo, db_hi = ev.delta in
+                  let skew = match (ea.wire, ev.wire) with
+                    | Some x, Some y when x <> y -> io.skew | _ -> 0 in
+                  let d = { lo = acc.lo + db_lo - da_hi - skew;
+                            hi = Option.map (fun h -> h + db_hi - da_lo + skew) acc.hi } in
+                  peer := !peer || p || not ea.mine;
+                  Hashtbl.replace pairs (a, v)
+                    (match Hashtbl.find_opt pairs (a, v) with Some x -> join x d | None -> d)
+                end
+              end
+              else if ev.label <> c.from_ then List.iter (fun s -> walk s acc p) ev.succ
+            in
+            List.iter (fun s -> walk s { lo = 0; hi = Some 0 } false) ea.succ
           end)
         evs;
-      let g = Option.value !acc ~default:{ lo = 0; hi = Some 0 } in
-      { constr = c; instances = !k; guaranteed = g; assumes_peer = !peer;
-        pass = !k > 0 && g.lo >= c.min_ticks })
+      let g = Hashtbl.fold (fun _ d acc -> Some (match acc with Some x -> join x d | None -> d)) pairs None in
+      let k = Hashtbl.length pairs in
+      let g = Option.value g ~default:{ lo = 0; hi = Some 0 } in
+      { constr = c; instances = k; guaranteed = g; assumes_peer = !peer;
+        pass = k > 0 && g.lo >= c.min_ticks })
     prog.constraints
 
 let print_certificate ?(tick_ns = 20) title lines =
