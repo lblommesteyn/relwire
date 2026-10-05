@@ -1,0 +1,15 @@
+# Synthesis of tt_um_relwire for place-and-route (IHP sg13g2, slow corner).
+# The SRAM is a hard macro: its liberty is read as a black-box cell.
+read_liberty -lib PLAT/lib/RM_IHPSG13_1P_256x48_c2_bm_bist_slow_1p08V_125C.lib
+read_verilog -sv ../rpm_core.v ../rpm_top.v
+hierarchy -check -top tt_um_relwire
+synth -top tt_um_relwire -flatten
+dfflibmap -liberty PLAT/lib/sg13g2_stdcell_slow_1p08V_125C.lib
+abc -liberty PLAT/lib/sg13g2_stdcell_slow_1p08V_125C.lib -D 20000
+setundef -zero
+splitnets -ports
+hilomap -singleton -hicell sg13g2_tiehi L_HI -locell sg13g2_tielo L_LO
+insbuf -buf sg13g2_buf_1 A X
+opt_clean -purge
+stat -liberty PLAT/lib/sg13g2_stdcell_slow_1p08V_125C.lib
+write_verilog -noattr out/tt_um_relwire.v

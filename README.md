@@ -76,11 +76,26 @@ loop one iteration short) are caught.
 | I2C write binary | 78 x 64 bit, per role | 25 x 26 bit, shared |
 | core (Yosys, sg13g2 typ) | 1,919 cells, 27.7k um2 | 2,102 cells, 27.7k um2 |
 
-Every program fits a 256x32 IHP SRAM macro (`RM_IHPSG13_1P_256x32`, 416.6 x
-118.8 um).
+### Top level and physical design
+
+`hw/rpm_top.v` (`tt_um_relwire`) puts 4 cores on one single-port IHP SRAM
+(`RM_IHPSG13_1P_256x48`) with time-multiplexed fetch (a tick is 3 + 4 x 4 = 19
+cycles), a shared constant table, a byte-wide loader on `ui_in`/`uio_in[7:6]`, and
+readback on `uo_out`. The differential test drives this top level at the pins:
+it programs the chip through the loader, runs, and reads data memory back.
+
+`hw/pnr/` (OpenROAD, IHP sg13g2 slow corner 1.08 V / 125 C, 50 MHz, 1200 x 600
+um die, no power grid):
+
+| | |
+|---|---|
+| cells (synthesis) | 15,416 + SRAM macro |
+| placed area | 299,283 um2, 43% utilization |
+| setup | met, worst slack +4.01 ns (SRAM read to core flop) |
+| hold | met after repair, worst slack +0.24 ns |
 
 Open questions: a data override demotes the whole role while a time override
-flips only that edge; the certificate does not handle branching programs yet;
+flips only that edge;
 CAN resync within a frame (only hard sync on SOF is modelled).
 
 Build: `dune build` (OCaml 4.14, dune 3).
