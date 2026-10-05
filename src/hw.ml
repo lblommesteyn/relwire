@@ -185,29 +185,43 @@ let write_file path lines =
 
 (* Write cfg/prog/data for up to 4 cores; [agents] pairs each core's role
    assignment with a freshly made (unrun) agent holding its inputs. *)
+(* Writes the loader byte stream (load.hex) that programs tt_um_relwire, and
+   cfg.hex (wire biases, which are board-level and applied by the harness).
+   Returns the compiled program and the stream length. *)
 let write_case dir prog (cores : (assignment * agent) list) =
   write_file (Filename.concat dir "cfg.hex")
     (List.map
        (fun s ->
-         let r = match s.resolution with PushPull -> 0 | DominantLow -> 1 | DominantHigh -> 2 in
          let b = match s.bias with PullDown -> 0 | PullUp -> 1 | Floating -> 2 in
-         Printf.sprintf "%02x" (r lor (b lsl 4)))
+         Printf.sprintf "%02x" (b lsl 4))
        prog.wires
     @ List.init (4 - List.length prog.wires) (fun _ -> "20"));
   let c = compile prog in
-  write_file (Filename.concat dir "prog.hex")
-    (Array.to_list (Array.map (Printf.sprintf "%07x") c.words));
-  (* cores beyond the scenario get mask 0 and an empty data memory; they
-     run as silent observers *)
-  write_file (Filename.concat dir "roles.hex")
-    (List.map (fun (asg, _) -> Printf.sprintf "%x" (role_mask prog asg)) cores
-    @ List.init (4 - List.length cores) (fun _ -> "0"));
-  write_file (Filename.concat dir "data.hex")
-    (List.map (fun (_, a) -> hex_data (data_bits prog a)) cores
-    @ List.init (4 - List.length cores) (fun _ -> String.make (dw / 4) '0'));
-  write_file (Filename.concat dir "consts.hex")
-    (Array.to_list (Array.map (Printf.sprintf "%04x") c.consts));
-  c
+  let bytes = ref [] in
+  let emit l = bytes := !bytes @ l in
+  Array.iteri
+    (fun a wd -> emit [ 1; a; (wd lsr 24) land 0xff; (wd lsr 16) land 0xff; (wd lsr 8) land 0xff; wd land 0xff ])
+    c.words;
+  Array.iteri (fun i v -> emit [ 2; i; v lsr 8; v land 0xff ]) c.consts;
+  List.iteri
+    (fun i (asg, a) ->
+      let bits = data_bits prog a in
+      for byte = 0 to (dw / 8) - 1 do
+        let v = ref 0 in
+        for j = 0 to 7 do
+          if bits.((byte * 8) + j) = Some L1 then v := !v lor (1 lsl j)
+        done;
+        emit [ 3; i; byte; !v ]
+      done;
+      emit [ 4; i; role_mask prog asg ])
+    cores;
+  List.iteri
+    (fun i s ->
+      emit [ 5; i; (match s.resolution with PushPull -> 0 | DominantLow -> 1 | DominantHigh -> 2) ])
+    prog.wires;
+  emit [ 6 ];
+  write_file (Filename.concat dir "load.hex") (List.map (Printf.sprintf "%02x") !bytes);
+  (c, List.length !bytes)
 
 let trace_lines prog (tr : trace) =
   List.map

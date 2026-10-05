@@ -55,9 +55,10 @@ module rpm_core #(
     output wire [2:0] ksel_b,
     input wire [15:0] ka,
     input wire [15:0] kb,
-    // load/inspect port: data memory loads during reset
-    input wire load,
-    input wire [DW-1:0] dmem_wdata,
+    // byte write port into data memory (used by the loader while stopped)
+    input wire ld_we,
+    input wire [2:0] ld_byte,
+    input wire [7:0] ld_data,
     output reg [DW-1:0] dmem
 );
   localparam INF = 16'hFFFF;
@@ -157,6 +158,7 @@ module rpm_core #(
 
   always @(posedge clk) begin
     ev_valid <= 1'b0;
+    if (ld_we) dmem[8*ld_byte+:8] <= ld_data;
     if (rst) begin
       pc <= 0;
       oe <= 0;
@@ -170,7 +172,6 @@ module rpm_core #(
       lactive <= 0;
       idx <= 0;
       for (i = 0; i < NW; i = i + 1) run_len[i] <= 0;
-      if (load) dmem <= dmem_wdata;
     end else if (exec_en && !halted) begin
       case (op)
         4'd0: begin  // HALT

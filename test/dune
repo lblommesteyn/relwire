@@ -11,5 +11,6 @@
  (libraries relwire_lib)
  (deps
   (glob_files %{project_root}/examples/*.rw)
-  (glob_files %{project_root}/hw/*.v))
+  (glob_files %{project_root}/hw/*.v)
+  (glob_files %{project_root}/hw/sim/*.v))
  (flags (:standard -warn-error -a)))

@@ -47,12 +47,12 @@ let scenario name prog ~ticks (cores : (assignment * (string * string) list) lis
       cores
   in
   let fresh = mk () in
-  let compiled = Hw.write_case dir prog fresh in
+  let compiled, nbytes = Hw.write_case dir prog fresh in
   let agents = List.map snd fresh in
   let tr = simulate ~wires:prog.wires ~agents ~ticks () in
   run
-    (Printf.sprintf "vvp -n %s/sim +dir=%s +ticks=%d +wires=%d > %s/vvp.log" root dir ticks
-       (List.length prog.wires) dir);
+    (Printf.sprintf "vvp -n %s/sim +dir=%s +ticks=%d +wires=%d +bytes=%d > %s/vvp.log" root dir
+       ticks (List.length prog.wires) nbytes dir);
   let tr_ok =
     report "bus trace"
       (first_diff (Hw.trace_lines prog tr) (read_lines (Filename.concat dir "trace_hw.txt")))
@@ -93,18 +93,27 @@ let scenario name prog ~ticks (cores : (assignment * (string * string) list) lis
          agents)
   in
   let nev = List.length hw_ev in
+  let rb_ok =
+    match List.find_opt (fun l -> String.length l > 9 && String.sub l 0 9 = "readback ") dm with
+    | Some l -> String.sub l 9 (String.length l - 9) = List.hd (String.split_on_char ' ' (List.hd dm))
+    | None -> false
+  in
+  if not rb_ok then print_endline "      pin readback of core 0 differs from its data memory";
   let words = Array.length compiled.Hw.words in
   check
     (Printf.sprintf "%s: %d ticks, %d events, one %d-instr binary: bus, events, data memory agree"
        name ticks nev words)
-    (tr_ok && ev_ok && dm_ok && nev > 0)
+    (tr_ok && ev_ok && dm_ok && rb_ok && nev > 0)
 
 let () =
   run (Printf.sprintf "mkdir -p %s" root);
-  run (Printf.sprintf "iverilog -g2012 -o %s/sim ../hw/tb.v ../hw/rpm_core.v" root);
+  run
+    (Printf.sprintf
+       "iverilog -g2012 -o %s/sim ../hw/tb_top.v ../hw/rpm_top.v ../hw/rpm_core.v         ../hw/sim/RM_IHPSG13_1P_256x48_c2_bm_bist.v"
+       root);
   let ctrl a = (Run_as [ "controller" ], [ ("addr", a) ]) in
   let tgt = (Run_as [ "target" ], [ ("ack", "0") ]) in
-  print_endline "RTL vs reference model";
+  print_endline "RTL (tt_um_relwire, 4 cores, shared SRAM, programmed over pins) vs reference model";
   scenario "i2c_arbitration" I2c.address_byte ~ticks:2000
     [ ctrl "10110110"; ctrl "10100110"; tgt; (Observe_all, []) ];
   scenario "i2c_write" I2c.write_transaction ~ticks:2500
