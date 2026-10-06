@@ -429,5 +429,56 @@ let () =
   let bad = { canp with constraints = [ { cname = "bit"; from_ = At "boundary"; to_ = At "boundary"; min_ticks = 101 } ] } in
   check "and a 101-tick bit requirement fails" (not (List.hd (certify bad (Run_as [ "tx" ]))).pass);
 
+  print_endline "18. single issue (one instruction per tick): certificate vs simulation";
+  let c1 = make_agent ~issue:1 ~name:"C1" wt (Run_as [ "controller" ])
+      ~inputs:[ ("addr", bits "10100110"); ("data", bits "01011101") ] in
+  let t1 = make_agent ~issue:1 ~name:"T1" wt (Run_as [ "target" ])
+      ~inputs:[ ("ack", bits "0"); ("ack2", bits "0") ] in
+  let o1 = make_agent ~issue:1 ~name:"O1" wt Observe_all ~inputs:[] in
+  let tr1 = simulate ~wires:I2c.wires ~agents:[ c1; t1; o1 ] ~ticks:3000 () in
+  check "single-issue transaction decodes cleanly"
+    (field_value o1 "data" = "01011101" && field_value c1 "ack2" = "0"
+     && List.for_all (fun x -> clean x && outcomes x Mismatch = [] && done_ x) [ c1; t1; o1 ]);
+  let cs = certify ~issue:1 wt (Run_as [ "controller" ]) in
+  print_certificate "  I2C Fast-mode, controller, single issue" cs;
+  let lo1 n = (List.find (fun l -> l.constr.cname = n) cs).guaranteed.lo in
+  let ed w lv =
+    let rec go acc prev = function
+      | [] -> List.rev acc
+      | (t, vs) :: rest ->
+          let v = List.assoc w vs in
+          go (if prev <> Some v && v = lv then t :: acc else acc) (Some v) rest
+    in
+    go [] None tr1
+  in
+  let sf = ed "SCL" L0 and sr = ed "SCL" L1 and df = ed "SDA" L0 and dr = ed "SDA" L1 in
+  let lv t w = List.assoc w (List.assoc t tr1) in
+  let ch = List.filter (fun t -> lv t "SCL" = L0) (df @ dr) |> List.sort compare in
+  List.iter
+    (fun (n, m) -> check (Printf.sprintf "%s simulated %d = certified %d" n m (lo1 n)) (m = lo1 n))
+    [ ("tLOW", minl (gaps sf sr)); ("tHIGH", minl (gaps sr sf));
+      ("tHD;STA", List.hd sf - List.hd df);
+      ("tSU;STO", minl (gaps sr [ List.nth dr (List.length dr - 1) ])) ];
+  let su1 = minl (gaps ch sr) and hd1 = minl (gaps sf ch) in
+  check (Printf.sprintf "tSU;DAT simulated %d >= certified %d" su1 (lo1 "tSU;DAT")) (su1 >= lo1 "tSU;DAT");
+  check (Printf.sprintf "tHD;DAT simulated %d >= certified %d" hd1 (lo1 "tHD;DAT")) (hd1 >= lo1 "tHD;DAT");
+  let progs =
+    [ ("i2c", wt); ("i2c_rw", rwp); ("spi", Spi.exchange); ("uart", Uart.frame);
+      ("manchester", Manchester.frame 32); ("can", canp) ] in
+  let hazards =
+    List.concat_map
+      (fun (n, p) ->
+        List.concat_map
+          (fun r -> List.map (fun h -> (n, r, h)) (reaction_hazards p (Run_as [ r ])))
+          (Rw_parse.roles p @ [ "nobody" ]))
+      progs
+  in
+  check "no reaction hazards in any example, any role" (hazards = []);
+  let fast = Rw_parse.program_of_string
+      "wire CS push_pull pull_up\nwire SCLK push_pull pull_down\nwire MOSI push_pull floating\nwire MISO push_pull floating\nfield mosi[8] from controller\nfield miso[8] from target\ntime cs_fall, cs_rise, sclk_rise, sclk_fall from controller\nprotocol {\n  edge CS -> 0 @cs_fall in [10, inf]\n  repeat i 8 {\n    put MOSI mosi[i]\n    put MISO miso[i]\n    edge SCLK -> 1 @sclk_rise in [1, inf]\n    sample MOSI mosi[i]\n    sample MISO miso[i]\n    edge SCLK -> 0 @sclk_fall in [1, inf]\n  }\n}\n" in
+  let hz = reaction_hazards fast (Run_as [ "target" ]) in
+  check (Printf.sprintf "SPI at 1-tick half period: target cannot keep up (%d hazards)" (List.length hz))
+    (List.exists (fun (t, k, lo) -> t = "sclk_fall" && k > lo) hz);
+
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

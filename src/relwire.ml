@@ -222,9 +222,10 @@ type agent = {
   clock : float;  (* this agent's tick length relative to nominal *)
   in_sync : int;  (* ticks from bus to what this agent sees *)
   out_delay : int;  (* extra ticks from this agent's drive to the bus *)
+  issue : int option;  (* instructions completed per tick; None = run until blocked *)
 }
 
-let make_agent ?(clock = 1.0) ?(in_sync = 0) ?(out_delay = 0) ~name prog assignment ~inputs =
+let make_agent ?(clock = 1.0) ?(in_sync = 0) ?(out_delay = 0) ?issue ~name prog assignment ~inputs =
   let env = Hashtbl.create 8 in
   List.iter
     (function
@@ -242,7 +243,7 @@ let make_agent ?(clock = 1.0) ?(in_sync = 0) ?(out_delay = 0) ~name prog assignm
     specs = List.map (fun w -> (w.name, w)) prog.wires;
     pc = 0; phase = Ready; anchor = 0; demoted = [];
     drives = Hashtbl.create 4; env; hist = Hashtbl.create 4; events = [];
-    clock; in_sync; out_delay;
+    clock; in_sync; out_delay; issue;
     lits =
       List.filter_map
         (function Lit { name; _ } | Derived { name; _ } -> Some (name, ()) | _ -> None)
@@ -260,8 +261,9 @@ let release_all a = Hashtbl.filter_map_inplace (fun _ _ -> Some HighZ) a.drives
 
 (* Run until blocked. [now] and [prev] are resolved wire values. *)
 let step a ~tick ~now ~prev =
-  let continue = ref true in
+  let continue = ref true and issued = ref 0 in
   while !continue && a.pc < Array.length a.machine do
+    let pc0 = a.pc in
     (match a.machine.(a.pc) with
      | IPut { wire; field; bit; role; own; inv } ->
          let d =
@@ -387,7 +389,12 @@ let step a ~tick ~now ~prev =
                await ()
              end
          | Driven _, _ -> continue := false
-         | (Ready | Awaiting), Observed | Awaiting, Supplied -> await ()))
+         | (Ready | Awaiting), Observed | Awaiting, Supplied -> await ()));
+    (* a completed instruction uses an issue slot *)
+    if a.pc <> pc0 then begin
+      incr issued;
+      match a.issue with Some k when !issued >= k -> continue := false | _ -> ()
+    end
   done;
   if a.pc >= Array.length a.machine then release_all a
 
@@ -481,16 +488,29 @@ type io = { sync : int; out : int; skew : int; jitter : int }
 let ideal_io = { sync = 0; out = 0; skew = 0; jitter = 0 }
 
 (* Events form a DAG over control flow: a branch gives an event several
-   successors. Each node's [off] is its distance from the previous event
-   on the path (puts sit at their anchor, so theirs is 0). A constraint is
-   checked on every path from a [from] event to the next [to] event. *)
+   successors. Each graph edge carries [gap], the number of instructions
+   executed from one event to the next (the event itself included). With
+   unlimited issue, zero-time instructions are free and gaps are ignored;
+   with one instruction per tick ([issue] = Some 1), every instruction
+   costs a tick, so an event happens no earlier than its gap allows:
+     - put:            k ticks after its anchor (k = instructions since it)
+     - supplied edge:  max(k, min) + 1 + out + sync after the anchor
+     - observed edge:  the window [min, max]; and the core must have reached
+                       the wait by then (k <= min), or it can miss the edge
+     - after mark:     max(k, ticks) *)
+type kind =
+  | KPut
+  | KDrive of { wait : int; lat : int; recessive : bool }
+  | KWatch of { lo : int; hi : int }
+  | KTimer of int
+
 type tev = {
   label : event_ref;
   wire : string option;
-  off : bound;
+  kind : kind;
   delta : int * int;
   mine : bool;
-  mutable succ : int list;
+  mutable succ : (int * int) list;  (* (node, gap) *)
 }
 
 let schedule ?(io = ideal_io) prog assignment =
@@ -506,26 +526,25 @@ let schedule ?(io = ideal_io) prog assignment =
       match ins with
       | IEdge { wire; level; time; own; min_after; max_after; _ } ->
           let spec = List.find (fun s -> s.name = wire) prog.wires in
-          let off, delta =
+          let kind, delta =
             match own with
-            | Observed -> ({ lo = min_after; hi = Some max_after }, seen_peer)
+            | Observed -> (KWatch { lo = min_after; hi = max_after }, seen_peer)
             | Supplied ->
-                if spec.resolution <> PushPull && drive_for spec level = HighZ
-                then ({ lo = min_after + lat; hi = None }, seen_mine)
-                else ({ lo = min_after + lat; hi = Some (min_after + lat) }, seen_mine)
+                let recessive = spec.resolution <> PushPull && drive_for spec level = HighZ in
+                (KDrive { wait = min_after; lat; recessive }, seen_mine)
           in
-          push pc { label = At time; wire = Some wire; off; delta; mine = own = Supplied; succ = [] }
+          push pc { label = At time; wire = Some wire; kind; delta; mine = own = Supplied; succ = [] }
       | IPut { wire; own; _ } ->
-          push pc { label = Change wire; wire = Some wire; off = { lo = 0; hi = Some 0 };
+          push pc { label = Change wire; wire = Some wire; kind = KPut;
                     delta = (1 + io.out, 1 + io.out); mine = own = Supplied; succ = [] }
       | IToggle { wire; time; own; nominal; min_after; max_after; _ } ->
-          let off, delta = match own with
-            | Supplied -> ({ lo = nominal + lat; hi = Some (nominal + lat) }, seen_mine)
-            | Observed -> ({ lo = min_after; hi = Some max_after }, seen_peer) in
-          push pc { label = At time; wire = Some wire; off; delta; mine = own = Supplied; succ = [] }
+          let kind, delta = match own with
+            | Supplied -> (KDrive { wait = nominal; lat; recessive = false }, seen_mine)
+            | Observed -> (KWatch { lo = min_after; hi = max_after }, seen_peer) in
+          push pc { label = At time; wire = Some wire; kind; delta; mine = own = Supplied; succ = [] }
       | IAfter { time; ticks } ->
-          push pc { label = At time; wire = None; off = { lo = ticks; hi = Some ticks };
-                    delta = (0, 0); mine = true; succ = [] }
+          push pc { label = At time; wire = None; kind = KTimer ticks; delta = (0, 0);
+                    mine = true; succ = [] }
       | ISample _ | IBranch _ | IJump _ -> ())
     m;
   let evs = Array.of_list (List.rev !evs) in
@@ -535,16 +554,19 @@ let schedule ?(io = ideal_io) prog assignment =
     | IJump j -> [ pc + 1 + j ]
     | _ -> [ pc + 1 ]
   in
-  (* first event on each path starting at instruction [pc] *)
+  (* first event on each path from instruction [pc], with instructions counted *)
   let memo = Hashtbl.create 64 in
   let rec firsts pc =
     if pc >= n then []
-    else if node_of.(pc) >= 0 then [ node_of.(pc) ]
+    else if node_of.(pc) >= 0 then [ (node_of.(pc), 1) ]
     else
       match Hashtbl.find_opt memo pc with
       | Some r -> r
       | None ->
-          let r = List.sort_uniq compare (List.concat_map firsts (flow pc)) in
+          let r =
+            List.sort_uniq compare
+              (List.concat_map (fun q -> List.map (fun (v, g) -> (v, g + 1)) (firsts q)) (flow pc))
+          in
           Hashtbl.replace memo pc r;
           r
   in
@@ -565,37 +587,84 @@ let join x y =
   { lo = min x.lo y.lo;
     hi = (match (x.hi, y.hi) with Some p, Some q -> Some (max p q) | _ -> None) }
 
-let certify ?(io = ideal_io) prog assignment =
+let add x y = { lo = x.lo + y.lo;
+                hi = (match (x.hi, y.hi) with Some p, Some q -> Some (p + q) | _ -> None) }
+
+let exact v = { lo = v; hi = Some v }
+
+(* Instructions since the anchor at each put, over every incoming path. *)
+let put_k evs ~issue =
+  let k = Array.make (Array.length evs) None in
+  let anchor e = match e.kind with KPut -> false | _ -> true in
+  Array.iteri
+    (fun v ev ->
+      let here = match (k.(v), anchor ev) with
+        | _, true -> (0, 0)
+        | Some x, false -> x
+        | None, false -> (0, 0) in
+      List.iter
+        (fun (s, g) ->
+          let g = if issue = None then 0 else g in
+          let lo, hi = here in
+          k.(s) <- Some (match k.(s) with
+            | None -> (lo + g, hi + g)
+            | Some (a, b) -> (min a (lo + g), max b (hi + g))))
+        ev.succ)
+    evs;
+  Array.map (Option.value ~default:(0, 0)) k
+
+(* Time of node [ev] relative to the walk start, given the last anchor's
+   relative time and the instructions (k) since it. Returns the event time
+   and whether it re-anchors. *)
+let event_time ev anchor (klo, khi) =
+  match ev.kind with
+  | KPut -> (add anchor { lo = klo; hi = Some khi }, false)
+  | KDrive { wait; lat; recessive } ->
+      let lo = max klo wait + lat in
+      (add anchor { lo; hi = (if recessive then None else Some (max khi wait + lat)) }, true)
+  | KWatch { lo; hi } -> (add anchor { lo; hi = Some hi }, true)
+  | KTimer t -> (add anchor { lo = max klo t; hi = Some (max khi t) }, true)
+
+let certify ?(io = ideal_io) ?issue prog assignment =
   let evs = schedule ~io prog assignment in
-  let add x y = { lo = x.lo + y.lo;
-                  hi = (match (x.hi, y.hi) with Some p, Some q -> Some (p + q) | _ -> None) } in
+  let pk = put_k evs ~issue in
   List.map
     (fun c ->
-      (* (from, to) pairs -> bus-time bound joined over every path *)
       let pairs = Hashtbl.create 16 and peer = ref false in
       Array.iteri
         (fun a ea ->
           if ea.label = c.from_ then begin
-            let rec walk v acc p =
+            (* the start's own anchor sits k_a before it when it is a put *)
+            let anchor0, k0 =
+              match ea.kind with
+              | KPut -> let kl, kh = pk.(a) in ({ lo = -kh; hi = Some (-kl) }, (kl, kh))
+              | _ -> (exact 0, (0, 0))
+            in
+            let rec walk v anchor (kl, kh) p g =
               let ev = evs.(v) in
-              (* a peer's zero-time put on the way cannot move the timing *)
-              let contributes = ev.off <> { lo = 0; hi = Some 0 } || ev.label = c.to_ in
-              let acc = add acc ev.off and p = p || (contributes && not ev.mine) in
+              let g = if issue = None then 0 else g in
+              let k = (kl + g, kh + g) in
+              let t, reanchor = event_time ev anchor k in
+              let contributes = ev.kind <> KPut || ev.label = c.to_ in
+              let p = p || (contributes && not ev.mine) in
               if ev.label = c.to_ then begin
                 if ea.mine || ev.mine then begin
                   let da_lo, da_hi = ea.delta and db_lo, db_hi = ev.delta in
                   let skew = match (ea.wire, ev.wire) with
                     | Some x, Some y when x <> y -> io.skew | _ -> 0 in
-                  let d = { lo = acc.lo + db_lo - da_hi - skew;
-                            hi = Option.map (fun h -> h + db_hi - da_lo + skew) acc.hi } in
+                  let d = { lo = t.lo + db_lo - da_hi - skew;
+                            hi = Option.map (fun h -> h + db_hi - da_lo + skew) t.hi } in
                   peer := !peer || p || not ea.mine;
                   Hashtbl.replace pairs (a, v)
                     (match Hashtbl.find_opt pairs (a, v) with Some x -> join x d | None -> d)
                 end
               end
-              else if ev.label <> c.from_ then List.iter (fun s -> walk s acc p) ev.succ
+              else if ev.label <> c.from_ then begin
+                let anchor, k = if reanchor then (t, (0, 0)) else (anchor, k) in
+                List.iter (fun (s, g) -> walk s anchor k p g) ev.succ
+              end
             in
-            List.iter (fun s -> walk s { lo = 0; hi = Some 0 } false) ea.succ
+            List.iter (fun (s, g) -> walk s anchor0 k0 false g) ea.succ
           end)
         evs;
       let g = Hashtbl.fold (fun _ d acc -> Some (match acc with Some x -> join x d | None -> d)) pairs None in
@@ -604,6 +673,28 @@ let certify ?(io = ideal_io) prog assignment =
       { constr = c; instances = k; guaranteed = g; assumes_peer = !peer;
         pass = k > 0 && g.lo >= c.min_ticks })
     prog.constraints
+
+(* Reaction hazards under single issue: an observed edge whose earliest
+   legal time comes before the core can reach the wait instruction. *)
+let reaction_hazards ?(io = ideal_io) ?(issue = 1) prog assignment =
+  ignore issue;
+  let evs = schedule ~io prog assignment in
+  let worst = Array.make (Array.length evs) 0 in
+  let pk = put_k evs ~issue:(Some 1) in
+  Array.iteri
+    (fun v ev ->
+      let base = match ev.kind with KPut -> snd pk.(v) | _ -> 0 in
+      List.iter (fun (s, g) -> worst.(s) <- max worst.(s) (base + g)) ev.succ)
+    evs;
+  Array.to_list
+    (Array.mapi
+       (fun v ev ->
+         match ev.kind with
+         | KWatch { lo; _ } when worst.(v) > lo ->
+             Some ((match ev.label with At t -> t | Change w -> w), worst.(v), lo)
+         | _ -> None)
+       evs)
+  |> List.filter_map Fun.id
 
 let print_certificate ?(tick_ns = 20) title lines =
   let ns t = float_of_int (t * tick_ns) in
