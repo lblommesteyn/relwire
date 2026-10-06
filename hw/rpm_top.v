@@ -10,12 +10,14 @@
 // Protocol wires: uio[3:0]. Loader: byte on ui_in, strobe on uio_in[7]
 // (rising edge), frame reset on uio_in[6]. Status / readback on uo_out.
 //
-// Tick schedule (T = 3 + SYNC + EXEC*NC cycles): slot 0 commits the cores'
+// Tick schedule (T = 4 + SYNC + EXEC*NC cycles): slot 0 commits the cores'
 // drives to the pins; the pins pass a SYNC-flop synchronizer (external
 // devices are asynchronous) and are latched as this tick's bus value at slot
-// 1 + SYNC; then EXEC rounds of NC exec slots. The SRAM is read one slot
-// ahead of the core that executes, so each core gets EXEC instructions per
-// tick. EXEC = 1 is single issue: every instruction costs one tick, which
+// 1 + SYNC; then EXEC rounds of NC exec slots. A core's word is read from
+// program memory two slots before it executes and parked in that core's own
+// instruction register one slot before, so decode starts from local flops
+// rather than from a bus that spans all four cores. Each core gets EXEC
+// instructions per tick. EXEC = 1 is single issue: every instruction costs one tick, which
 // the timing certificate accounts for (certify ~issue:1).
 //
 // Loader commands (first byte), arguments follow:
@@ -42,7 +44,7 @@ module tt_um_relwire #(
     input wire rst_n
 );
   localparam NW = 4;
-  localparam T = 3 + SYNC + EXEC * NC;
+  localparam T = 4 + SYNC + EXEC * NC;
   localparam LATCH = 1 + SYNC;  // slot at which the bus value is latched
   localparam CAPTURE = LATCH + 1;  // first slot at which [now] holds it
   localparam CB = $clog2(NC);
@@ -166,9 +168,11 @@ module tt_um_relwire #(
   end
 
   wire fetching = slot >= LATCH + 1 && slot < LATCH + 1 + EXEC * NC;
-  wire executing = slot >= LATCH + 2;
+  wire parking = slot >= LATCH + 2 && slot < LATCH + 2 + EXEC * NC;
+  wire executing = slot >= LATCH + 3;
   wire [CB-1:0] fetch_core = (slot - (LATCH + 1)) % NC;
-  wire [CB-1:0] exec_core = (slot - (LATCH + 2)) % NC;
+  wire [CB-1:0] park_core = (slot - (LATCH + 2)) % NC;
+  wire [CB-1:0] exec_core = (slot - (LATCH + 3)) % NC;
 
   // ---------------- cores ----------------
   wire [7:0] pc[0:NC-1];
@@ -180,6 +184,7 @@ module tt_um_relwire #(
   wire halted[0:NC-1];
   wire [63:0] dmem[0:NC-1];
   wire [25:0] instr;
+  reg [25:0] ireg[0:NC-1];  // per-core instruction registers
   wire [2*NW-1:0] res = {wres[3], wres[2], wres[1], wres[0]};
   wire [15:0] ka = kt[ksa[exec_core]], kb = kt[ksb[exec_core]];
 
@@ -188,7 +193,7 @@ module tt_um_relwire #(
     for (g = 0; g < NC; g = g + 1) begin : core
       rpm_core #(.NW(NW)) u (
           .clk(clk), .rst(cores_rst), .clr(!rst_n), .exec_en(executing && exec_core == g),
-          .tick(tick), .now(now), .prev(prev), .res(res), .instr(instr),
+          .tick(tick), .now(now), .prev(prev), .res(res), .instr(ireg[g]),
           .role_mask(masks[g]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
           .ev_valid(ev_valid[g]), .ev_code(ev_code[g]), .ev_addr(ev_addr[g]),
           .halted(halted[g]), .ksel_a(ksa[g]), .ksel_b(ksb[g]), .ka(ka), .kb(kb),
@@ -203,6 +208,10 @@ module tt_um_relwire #(
   reg [25:0] prog_mem[0:DEPTH-1];
   reg [25:0] dout;
   assign instr = dout;
+  integer ig;
+  always @(posedge clk)
+    for (ig = 0; ig < NC; ig = ig + 1)
+      if (parking && park_core == ig) ireg[ig] <= instr;
   always @(posedge clk) begin
     if (sram_we) prog_mem[sram_waddr[6:0]] <= sram_wdata;
     else if (fetching) dout <= prog_mem[pc[fetch_core][6:0]];
