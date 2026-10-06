@@ -11,10 +11,6 @@ rm -rf "$WORK" && mkdir -p "$WORK"
 cp -r "$HERE/info.yaml" "$HERE/src" "$HERE/docs" "$WORK/"
 cp "$HERE/../hw/rpm_top.v" "$WORK/src/tt_um_relwire.v"
 cp "$HERE/../hw/rpm_core.v" "$WORK/src/rpm_core.v"
-M=RM_IHPSG13_1P_256x48_c2_bm_bist
-S=$PDK_ROOT/ihp-sg13g2/libs.ref/sg13g2_sram
-mkdir -p "$WORK/macro/$M"
-cp "$S/gds/$M.gds" "$S/lef/$M.lef" "$S/cdl/$M.cdl" "$S"/lib/${M}_*.lib "$WORK/macro/$M/"
 ln -sfn "$TT_HOME/tools" "$WORK/tt"
 cd "$WORK"
 git init -q && git add -A && git -c user.email=local@local -c user.name=local commit -qm local

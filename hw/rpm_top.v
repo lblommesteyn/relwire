@@ -1,7 +1,10 @@
 // RelWire protocol emulator, Tiny Tapeout top level.
 //
-// NC cores share one single-port IHP SRAM (the program) and one 8-entry
-// constant table (the timing). Every core runs the same binary; a 4-bit
+// NC cores share one single-port program memory (128 x 26 flip-flops,
+// registered read) and one 8-entry constant table (the timing). The memory is
+// plain logic rather than an IHP SRAM macro: on CMOS5L the macro's Metal4
+// power pins cannot reach Tiny Tapeout's Metal4-only power grid without
+// TopMetal1, which user designs may not use. Every core runs the same binary; a 4-bit
 // role mask per core says which roles it plays.
 //
 // Protocol wires: uio[3:0]. Loader: byte on ui_in, strobe on uio_in[7]
@@ -195,14 +198,15 @@ module tt_um_relwire #(
   endgenerate
 
   // ---------------- program memory ----------------
-  wire [47:0] dout;
-  assign instr = dout[25:0];
-  RM_IHPSG13_1P_256x48_c2_bm_bist imem (
-      .A_CLK(clk), .A_MEN(1'b1), .A_WEN(sram_we), .A_REN(!sram_we && fetching),
-      .A_ADDR(sram_we ? sram_waddr : pc[fetch_core]), .A_DIN({22'b0, sram_wdata}),
-      .A_DLY(1'b1), .A_DOUT(dout), .A_BM({48{1'b1}}),
-      .A_BIST_CLK(1'b0), .A_BIST_EN(1'b0), .A_BIST_MEN(1'b0), .A_BIST_WEN(1'b0),
-      .A_BIST_REN(1'b0), .A_BIST_ADDR(8'b0), .A_BIST_DIN(48'b0), .A_BIST_BM(48'b0));
+  // 128 words; registered read one slot ahead of execution, as an SRAM would.
+  localparam DEPTH = 128;
+  reg [25:0] prog_mem[0:DEPTH-1];
+  reg [25:0] dout;
+  assign instr = dout;
+  always @(posedge clk) begin
+    if (sram_we) prog_mem[sram_waddr[6:0]] <= sram_wdata;
+    else if (fetching) dout <= prog_mem[pc[fetch_core][6:0]];
+  end
 
   // ---------------- pins ----------------
   // one loop variable per always block: a shared one would have two drivers

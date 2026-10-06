@@ -79,10 +79,20 @@ loop one iteration short) are caught.
 ### Top level and physical design
 
 `hw/rpm_top.v` (`tt_um_relwire`) puts 4 cores on one single-port IHP SRAM
-(`RM_IHPSG13_1P_256x48`) with time-multiplexed fetch (a tick is 3 + 4 x 4 = 19
-cycles), a shared constant table, a byte-wide loader on `ui_in`/`uio_in[7:6]`, and
-readback on `uo_out`. The differential test drives this top level at the pins:
-it programs the chip through the loader, runs, and reads data memory back.
+(`RM_IHPSG13_1P_256x48`) with time-multiplexed fetch, a shared constant table, a
+2-flop synchronizer on the protocol pins, a byte-wide loader on
+`ui_in`/`uio_in[7:6]`, and readback on `uo_out`.
+
+**Single issue.** Each core executes one instruction per tick; a tick is
+3 + 2 (sync) + 4 (cores) = 9 cycles, 180 ns at 50 MHz. Every instruction,
+including loop setup and the final halt, costs a tick, and the timing
+certificate charges for it (`relwirec FILE --certify ROLE --issue 1`). It also
+checks reaction hazards: a core watching for an edge must reach the wait
+instruction before the earliest time the edge may legally occur.
+
+The differential test drives this top level at the pins against the
+single-issue reference model: it programs the chip through the loader, runs,
+and reads data memory back.
 
 `hw/pnr/` (OpenROAD, IHP sg13g2 slow corner 1.08 V / 125 C, 50 MHz, 1200 x 600
 um die, no power grid):

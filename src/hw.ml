@@ -144,7 +144,7 @@ let compile prog =
        if b + width > dw then failwith "data memory overflow"
    | [] -> ());
   let words = Array.of_list (go [] None prog.body @ [ 0 ]) in
-  if Array.length words > 256 then failwith "program larger than 256 instructions";
+  if Array.length words > 128 then failwith "program larger than 128 instructions";
   let c = Array.make 8 0 in
   List.iteri (fun i v -> c.(i) <- v) !consts;
   { words; consts = c }

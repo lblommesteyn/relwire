@@ -3,13 +3,15 @@
      relwirec FILE.rw                    summary
      relwirec FILE.rw --role R [...]     machine for role(s) R
      relwirec FILE.rw --observe          passive analyzer machine
-     relwirec FILE.rw --certify R [--io SYNC,OUT,SKEW,JITTER] [--tick-ns N] *)
+     relwirec FILE.rw --certify R [--io SYNC,OUT,SKEW,JITTER] [--tick-ns N] [--issue N]
+   --issue 1 certifies the chip's timing (one instruction per tick); the
+   default certifies the idealized run-until-blocked semantics. *)
 open Relwire
 
 let usage () =
   prerr_endline
     "usage: relwirec FILE.rw [--role R]... [--observe] [--certify R] \
-     [--io SYNC,OUT,SKEW,JITTER] [--tick-ns N]";
+     [--io SYNC,OUT,SKEW,JITTER] [--tick-ns N] [--issue N]";
   exit 2
 
 let lvl = function L0 -> "0" | L1 -> "1"
@@ -50,13 +52,14 @@ let print_machine title m =
 let () =
   let args = List.tl (Array.to_list Sys.argv) in
   let file = ref None and roles = ref [] and observe = ref false
-  and cert = ref None and io = ref ideal_io and tick_ns = ref 20 in
+  and cert = ref None and io = ref ideal_io and tick_ns = ref 20 and issue = ref None in
   let rec go = function
     | [] -> ()
     | "--role" :: r :: rest -> roles := !roles @ [ r ]; go rest
     | "--observe" :: rest -> observe := true; go rest
     | "--certify" :: r :: rest -> cert := Some r; go rest
     | "--tick-ns" :: n :: rest -> tick_ns := int_of_string n; go rest
+    | "--issue" :: n :: rest -> issue := Some (int_of_string n); go rest
     | "--io" :: spec :: rest ->
         (match List.map int_of_string (String.split_on_char ',' spec) with
          | [ sync; out; skew; jitter ] -> io := { sync; out; skew; jitter }
@@ -95,13 +98,21 @@ let () =
    | Some r ->
        check_role r;
        if prog.constraints = [] then (Printf.eprintf "%s: no constraints to certify\n" path; exit 1);
-       let lines = certify ~io:!io prog (Run_as [ r ]) in
+       let lines = certify ~io:!io ?issue:!issue prog (Run_as [ r ]) in
+       let hz = match !issue with
+         | Some k -> reaction_hazards ~issue:k prog (Run_as [ r ]) | None -> [] in
+       List.iter
+         (fun (t, k, lo) ->
+           Printf.printf "  HAZARD: @%s may occur %d ticks after its anchor, but the core needs %d to reach it
+" t lo k)
+         hz;
        let i = !io in
        print_certificate ~tick_ns:!tick_ns
-         (Printf.sprintf "%s, role %s, %d ns/tick, io sync=%d out=%d skew=%d jitter=%d"
-            (Filename.basename path) r !tick_ns i.sync i.out i.skew i.jitter)
+         (Printf.sprintf "%s, role %s, %d ns/tick, io sync=%d out=%d skew=%d jitter=%d%s"
+            (Filename.basename path) r !tick_ns i.sync i.out i.skew i.jitter
+            (match !issue with Some k -> Printf.sprintf ", issue %d" k | None -> ""))
          lines;
-       if not (List.for_all (fun l -> l.pass) lines) then exit 1;
+       if hz <> [] || not (List.for_all (fun l -> l.pass) lines) then exit 1;
        did := true);
   if not !did then begin
     Printf.printf "%s: %d wires, roles: %s, %d constraints\n" (Filename.basename path)

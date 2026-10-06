@@ -11,7 +11,6 @@ project:
   source_files:
     - "tt_um_relwire.v"
     - "rpm_core.v"
-    - "RM_IHPSG13_1P_256x48_c2_bm_bist.v"
 
 pinout:
   ui[0]: "load data[0]"
