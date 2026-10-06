@@ -36,6 +36,7 @@ module rpm_core #(
 ) (
     input wire clk,
     input wire rst,
+    input wire clr,  // power-on clear of data memory (rst alone keeps it for the loader)
     input wire exec_en,
     input wire [15:0] tick,
     input wire [NW-1:0] now,
@@ -158,7 +159,8 @@ module rpm_core #(
 
   always @(posedge clk) begin
     ev_valid <= 1'b0;
-    if (ld_we) dmem[8*ld_byte+:8] <= ld_data;
+    if (clr) dmem <= 0;
+    else if (ld_we) dmem[8*ld_byte+:8] <= ld_data;
     if (rst) begin
       pc <= 0;
       oe <= 0;

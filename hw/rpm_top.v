@@ -187,7 +187,7 @@ module tt_um_relwire #(
   generate
     for (g = 0; g < NC; g = g + 1) begin : core
       rpm_core #(.NW(NW)) u (
-          .clk(clk), .rst(cores_rst), .exec_en(executing && exec_core == g),
+          .clk(clk), .rst(cores_rst), .clr(!rst_n), .exec_en(executing && exec_core == g),
           .tick(tick), .now(now), .prev(prev), .res(res), .instr(instr),
           .role_mask(masks[g]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
           .ev_valid(ev_valid[g]), .ev_code(ev_code[g]), .ev_addr(ev_addr[g]),
@@ -244,11 +244,15 @@ module tt_um_relwire #(
   reg [2:0] last_code;
   reg [CB-1:0] last_core;
   always @(posedge clk)
-    for (cs = 0; cs < NC; cs = cs + 1)
-      if (ev_valid[cs]) begin
-        last_code <= ev_code[cs];
-        last_core <= cs[CB-1:0];
-      end
+    if (!rst_n) begin
+      last_code <= 0;
+      last_core <= 0;
+    end else
+      for (cs = 0; cs < NC; cs = cs + 1)
+        if (ev_valid[cs]) begin
+          last_code <= ev_code[cs];
+          last_core <= cs[CB-1:0];
+        end
 
   wire all_halted = halted[0] & halted[1] & (NC < 3 || halted[2]) & (NC < 4 || halted[3]);
   assign uo_out = rb_mode ? dmem[rb_core][8*rb_byte+:8]
