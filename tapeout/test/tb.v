@@ -3,6 +3,7 @@
 
 // Testbench for the cocotb test: pull-ups on the four protocol wires (an
 // open-drain I2C bus), and the loader strobe/frame bits driven by test.py.
+// The CMOS5L gate-level netlist is unpowered, so there are no VPWR/VGND ports.
 module tb ();
 
   initial begin
@@ -29,16 +30,7 @@ module tb ();
   endgenerate
   wire [7:0] uio_in = {load_strobe, load_frame, 2'b00, bus};
 
-`ifdef GL_TEST
-  wire VPWR = 1'b1;
-  wire VGND = 1'b0;
-`endif
-
   tt_um_relwire user_project (
-`ifdef GL_TEST
-      .VPWR   (VPWR),
-      .VGND   (VGND),
-`endif
       .ui_in  (ui_in),
       .uo_out (uo_out),
       .uio_in (uio_in),
