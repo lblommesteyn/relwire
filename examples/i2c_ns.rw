@@ -1,0 +1,48 @@
+# I2C write: START, address, ACK, data byte, ACK, STOP.
+# One program: controller, target, sniffer and checker are all
+# specializations of it. Times are physical: compile with relwirec --tick-ns.
+
+const t_hd_sta = 600ns
+const t_low    = 1300ns
+const t_high   = 600ns
+const t_su_dat = 100ns
+const t_su_sto = 600ns
+
+wire SCL dominant_low pull_up
+wire SDA dominant_low pull_up
+
+field addr[8]  from controller
+field ack[1]   from target
+field data[8]  from controller
+field ack2[1]  from target
+lit   stop_lo = 0 from controller
+time  stop from controller
+time  start, scl_rise, scl_fall from controller
+
+macro bit_cell(f, i) {
+  put    SDA f[i]
+  edge   SCL -> 1 @scl_rise in [t_low, inf]
+  sample SDA f[i]
+  edge   SCL -> 0 @scl_fall in [t_high, inf]
+}
+
+protocol {
+  edge SDA -> 0 @start    in [200ns, inf]
+  edge SCL -> 0 @scl_fall in [t_hd_sta, inf]
+  repeat i 8 { use bit_cell(addr, i) }
+  use bit_cell(ack, 0)
+  repeat i 8 { use bit_cell(data, i) }
+  use bit_cell(ack2, 0)
+  # STOP: SDA low at the last SCL rise, then rises while SCL is high
+  put    SDA stop_lo[0]
+  edge   SCL -> 1 @scl_rise in [t_low, inf]
+  sample SDA stop_lo[0]
+  edge   SDA -> 1 @stop in [t_su_sto, inf]
+}
+
+constraint "tHD;STA": start      -> scl_fall >= t_hd_sta
+constraint "tLOW":    scl_fall   -> scl_rise >= t_low
+constraint "tHIGH":   scl_rise   -> scl_fall >= t_high
+constraint "tSU;DAT": change SDA -> scl_rise >= t_su_dat
+constraint "tHD;DAT": scl_fall   -> change SDA >= 0ns
+constraint "tSU;STO": scl_rise   -> stop >= t_su_sto

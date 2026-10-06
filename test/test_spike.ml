@@ -426,7 +426,7 @@ let () =
   check "CAN bit timing exact on every path: bit = 100, seg1 = 75, seg2 = 25"
     (g "bit" ccan = { lo = 100; hi = Some 100 } && g "tSEG1" ccan = { lo = 75; hi = Some 75 }
      && g "tSEG2" ccan = { lo = 25; hi = Some 25 });
-  let bad = { canp with constraints = [ { cname = "bit"; from_ = At "boundary"; to_ = At "boundary"; min_ticks = 101 } ] } in
+  let bad = { canp with constraints = [ { cname = "bit"; from_ = At "boundary"; to_ = At "boundary"; min_ticks = 101; spec_ns = None } ] } in
   check "and a 101-tick bit requirement fails" (not (List.hd (certify bad (Run_as [ "tx" ]))).pass);
 
   print_endline "18. single issue (one instruction per tick): certificate vs simulation";
@@ -479,6 +479,19 @@ let () =
   let hz = reaction_hazards fast (Run_as [ "target" ]) in
   check (Printf.sprintf "SPI at 1-tick half period: target cannot keep up (%d hazards)" (List.length hz))
     (List.exists (fun (t, k, lo) -> t = "sclk_fall" && k > lo) hz);
+
+  print_endline "19. physical units: one source, any tick length";
+  let n20 = Rw_parse.program_of_file ~tick_ns:20 "../examples/i2c_ns.rw" in
+  check "i2c_ns.rw at 20 ns compiles to the same program as i2c.rw"
+    ({ n20 with constraints = [] } = { wt with constraints = [] }
+     && List.map (fun c -> c.min_ticks) n20.constraints = List.map (fun c -> c.min_ticks) wt.constraints);
+  let n180 = Rw_parse.program_of_file ~tick_ns:180 "../examples/i2c_ns.rw" in
+  let c180 = certify ~issue:1 n180 (Run_as [ "controller" ]) in
+  print_certificate ~tick_ns:180 "  i2c_ns.rw on the chip: 180 ns tick, single issue" c180;
+  check "Fast-mode spec holds at the chip's tick, in real nanoseconds"
+    (List.for_all (fun l -> l.pass && l.guaranteed.lo * 180 >= Option.get l.constr.spec_ns) c180);
+  check "and no reaction hazards on the chip" (reaction_hazards n180 (Run_as [ "controller" ]) = []
+                                                && reaction_hazards n180 (Run_as [ "target" ]) = []);
 
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

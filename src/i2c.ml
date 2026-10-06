@@ -14,12 +14,12 @@ let wires =
     { name = "SDA"; resolution = DominantLow; bias = PullUp } ]
 
 let fast_mode =
-  [ { cname = "tHD;STA"; from_ = At "start"; to_ = At "scl_fall"; min_ticks = t_hd_sta };
-    { cname = "tLOW"; from_ = At "scl_fall"; to_ = At "scl_rise"; min_ticks = t_low };
-    { cname = "tHIGH"; from_ = At "scl_rise"; to_ = At "scl_fall"; min_ticks = t_high };
-    { cname = "tSU;DAT"; from_ = Change "SDA"; to_ = At "scl_rise"; min_ticks = t_su_dat };
-    { cname = "tHD;DAT"; from_ = At "scl_fall"; to_ = Change "SDA"; min_ticks = 0 };
-    { cname = "tSU;STO"; from_ = At "scl_rise"; to_ = At "stop"; min_ticks = t_su_sto } ]
+  [ { cname = "tHD;STA"; from_ = At "start"; to_ = At "scl_fall"; min_ticks = t_hd_sta; spec_ns = None };
+    { cname = "tLOW"; from_ = At "scl_fall"; to_ = At "scl_rise"; min_ticks = t_low; spec_ns = None };
+    { cname = "tHIGH"; from_ = At "scl_rise"; to_ = At "scl_fall"; min_ticks = t_high; spec_ns = None };
+    { cname = "tSU;DAT"; from_ = Change "SDA"; to_ = At "scl_rise"; min_ticks = t_su_dat; spec_ns = None };
+    { cname = "tHD;DAT"; from_ = At "scl_fall"; to_ = Change "SDA"; min_ticks = 0; spec_ns = None };
+    { cname = "tSU;STO"; from_ = At "scl_rise"; to_ = At "stop"; min_ticks = t_su_sto; spec_ns = None } ]
 
 let bit_cell field idx =
   [ Put { wire = "SDA"; field; idx };

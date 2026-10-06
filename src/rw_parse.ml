@@ -53,6 +53,8 @@ let lex src =
 type st = {
   mutable toks : ptok list;
   consts : (string, int) Hashtbl.t;
+  consts_ns : (string, int) Hashtbl.t;  (* constants written with a time unit *)
+  tick_ns : int;
   macros : (string, string list * ptok list) Hashtbl.t;
   mutable wires : wire_spec list;
   mutable decls : decl list;
@@ -104,9 +106,15 @@ and term st =
   in
   loop (); !v
 
+(* A literal may carry a time unit; it becomes whole ticks at [st.tick_ns],
+   rounded up (a minimum must never shrink). *)
 and atom st =
   match peek st with
-  | Int n -> ignore (next st); n
+  | Int n -> (
+      ignore (next st);
+      match unit_ns st n with
+      | Some v -> (v + st.tick_ns - 1) / st.tick_ns
+      | None -> n)
   | Id "inf" -> ignore (next st); 1_000_000
   | Id x -> (
       match Hashtbl.find_opt st.consts x with
@@ -114,6 +122,25 @@ and atom st =
       | None -> err st ("unknown constant " ^ x))
   | Sym "(" -> ignore (next st); let v = expr st in expect st ")"; v
   | t -> err st (Printf.sprintf "expected a number, found '%s'" (show t))
+
+and unit_ns st n =
+  match peek st with
+  | Id "ns" -> ignore (next st); Some n
+  | Id "us" -> ignore (next st); Some (n * 1000)
+  | Id "ms" -> ignore (next st); Some (n * 1_000_000)
+  | _ -> None
+
+(* The requirement in ns, when the expression is one literal or constant
+   written with a time unit. *)
+let spec_of st =
+  match st.toks with
+  | { t = Int n; _ } :: { t = Id "ns"; _ } :: _ -> Some n
+  | { t = Int n; _ } :: { t = Id "us"; _ } :: _ -> Some (n * 1000)
+  | { t = Id x; _ } :: rest when Hashtbl.mem st.consts_ns x -> (
+      match rest with
+      | { t = Sym ("+" | "-" | "*" | "/"); _ } :: _ -> None
+      | _ -> Some (Hashtbl.find st.consts_ns x))
+  | _ -> None
 
 let level st =
   match peek st with
@@ -291,6 +318,7 @@ let top st =
       ignore (next st);
       let x = ident st in
       expect st "=";
+      (match spec_of st with Some v -> Hashtbl.replace st.consts_ns x v | None -> ());
       Hashtbl.replace st.consts x (expr st)
   | Id "wire" ->
       ignore (next st);
@@ -373,22 +401,24 @@ let top st =
       expect st "->";
       let to_ = endpoint st in
       expect st ">=";
-      st.constraints <- st.constraints @ [ { cname; from_; to_; min_ticks = expr st } ]
+      let spec_ns = spec_of st in
+      st.constraints <- st.constraints @ [ { cname; from_; to_; min_ticks = expr st; spec_ns } ]
   | t -> err st (Printf.sprintf "expected a declaration, found '%s'" (show t))
 
-let program_of_string src =
-  let st = { toks = lex src; consts = Hashtbl.create 8; macros = Hashtbl.create 8;
+let program_of_string ?(tick_ns = 20) src =
+  let st = { toks = lex src; consts = Hashtbl.create 8; consts_ns = Hashtbl.create 8; tick_ns;
+             macros = Hashtbl.create 8;
              wires = []; decls = []; body = None; constraints = [] } in
   while peek st <> Eof do top st done;
   match st.body with
   | None -> raise (Parse_error (0, "no protocol block"))
   | Some body -> { wires = st.wires; decls = st.decls; body; constraints = st.constraints }
 
-let program_of_file path =
+let program_of_file ?tick_ns path =
   let ic = open_in_bin path in
   let src = really_input_string ic (in_channel_length ic) in
   close_in ic;
-  program_of_string src
+  program_of_string ?tick_ns src
 
 let roles (prog : Relwire.program) =
   List.sort_uniq compare

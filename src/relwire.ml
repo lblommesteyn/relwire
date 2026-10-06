@@ -61,7 +61,15 @@ type decl =
 (* Constraint endpoints: an edge (by time variable) or a Put onto a wire. *)
 type event_ref = At of string | Change of string
 
-type constr = { cname : string; from_ : event_ref; to_ : event_ref; min_ticks : int }
+(* [spec_ns]: the requirement as written, when it was given in time units;
+   [min_ticks] is it rounded up to whole ticks. *)
+type constr = {
+  cname : string;
+  from_ : event_ref;
+  to_ : event_ref;
+  min_ticks : int;
+  spec_ns : int option;
+}
 
 type stmt =
   (* The edge's time is a variable: its owner binds it, everyone else
@@ -716,9 +724,11 @@ let print_certificate ?(tick_ns = 20) title lines =
         | Some h when h = l.guaranteed.lo -> ""
         | Some h -> Printf.sprintf "..%.0f" (ns h)
         | None -> "..inf" in
+      let spec = match l.constr.spec_ns with
+        | Some v -> float_of_int v | None -> ns l.constr.min_ticks in
       Printf.printf "  %-9s %8.0fns %14.0fns%-8s %+8.0fns  %s%s (%d)\n" l.constr.cname
-        (ns l.constr.min_ticks) (ns l.guaranteed.lo) hi
-        (ns (l.guaranteed.lo - l.constr.min_ticks))
+        spec (ns l.guaranteed.lo) hi
+        (ns l.guaranteed.lo -. spec)
         (if l.pass then "PASS" else "FAIL")
         (if l.assumes_peer then " assumes peer" else "") l.instances)
     lines;

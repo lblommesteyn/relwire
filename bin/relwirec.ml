@@ -71,7 +71,7 @@ let () =
   go args;
   let path = match !file with Some f -> f | None -> usage () in
   let prog =
-    try Rw_parse.program_of_file path with
+    try Rw_parse.program_of_file ~tick_ns:!tick_ns path with
     | Rw_parse.Parse_error (line, msg) ->
         Printf.eprintf "%s:%d: %s\n" path line msg; exit 1
     | Failure msg -> Printf.eprintf "%s: %s\n" path msg; exit 1
