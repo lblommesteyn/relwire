@@ -34,6 +34,13 @@
   "//": "Cap router threads: full-core detailed routing has crashed WSL on this machine before.",
   "ROUTING_CORES": 8,
 
+  "//": "Max-slew cleanup: weak decode gates drive long nets on a 1.3 mm die.",
+  "//": "Placement-stage repair only (post-GRT repair broke setup): tighter targets",
+  "//": "plus buffering of long wires.",
+  "DESIGN_REPAIR_MAX_SLEW_PCT": 30,
+  "DESIGN_REPAIR_MAX_CAP_PCT": 30,
+  "DESIGN_REPAIR_MAX_WIRE_LENGTH": 400,
+
   "//": "Configuration docs: https://librelane.readthedocs.io/en/latest/reference/configuration.html",
 
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
