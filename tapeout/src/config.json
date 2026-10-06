@@ -31,6 +31,9 @@
   "//": "https://tinytapeout.com/faq/#how-can-i-map-an-additional-external-clock-to-one-of-the-gpios",
   "CLOCK_PORT": "clk",
 
+  "//": "Cap router threads: full-core detailed routing has crashed WSL on this machine before.",
+  "ROUTING_CORES": 8,
+
   "//": "Configuration docs: https://librelane.readthedocs.io/en/latest/reference/configuration.html",
 
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
