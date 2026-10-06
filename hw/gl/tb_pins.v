@@ -25,14 +25,16 @@ module tb_pins;
   reg [1023:0] dir;
   integer cycles, nbytes, f, i, c, b;
 
+  // Inputs change on the falling edge: changing them on the rising edge races
+  // the first synchronizer flop, differently in RTL and gate-level runs.
   task send(input [7:0] v);
     begin
-      ui_in = v;
-      repeat (2) @(posedge clk);
+      @(negedge clk) ui_in = v;
+      repeat (2) @(negedge clk);
       stb = 1;
-      repeat (3) @(posedge clk);
+      repeat (3) @(negedge clk);
       stb = 0;
-      repeat (3) @(posedge clk);
+      repeat (3) @(negedge clk);
     end
   endtask
 
@@ -43,9 +45,9 @@ module tb_pins;
     $readmemh({dir, "/cfg.hex"}, cfg);
     $readmemh({dir, "/load.hex"}, stream);
     f = $fopen({dir, "/pins.txt"}, "w");
-    repeat (4) @(posedge clk);
+    repeat (4) @(negedge clk);
     rst_n = 1;
-    repeat (4) @(posedge clk);
+    repeat (4) @(negedge clk);
     for (i = 0; i < nbytes; i = i + 1) send(stream[i]);
     for (i = 0; i < cycles; i = i + 1) begin
       @(negedge clk);
@@ -57,7 +59,7 @@ module tb_pins;
         send(8'h08);
         send(c);
         send(b);
-        repeat (2) @(posedge clk);
+        repeat (2) @(negedge clk);
         $fwrite(f, "rb %0d %0d %h\n", c, b, uo_out);
       end
     $fclose(f);

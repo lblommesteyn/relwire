@@ -18,6 +18,6 @@ if cmp -s "$OUT/rtl_case/pins.txt" "$OUT/gl_case/pins.txt"; then
   echo "GL MATCH $(basename "$CASE"): $n lines identical"
 else
   echo "GL MISMATCH $(basename "$CASE")"
-  diff "$OUT/rtl_case/pins.txt" "$OUT/gl_case/pins.txt" | grep -E "^[<>]" | sort | uniq -c | sort -rn | head -12
+  diff "$OUT/rtl_case/pins.txt" "$OUT/gl_case/pins.txt" | head -12
   exit 1
 fi

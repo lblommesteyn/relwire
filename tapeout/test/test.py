@@ -8,7 +8,7 @@ import os
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import ClockCycles, FallingEdge
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TICK_CYCLES = 9  # 3 + 2 (pin synchronizer) + 4 cores
@@ -25,12 +25,15 @@ def read_vectors():
 
 
 async def send(dut, byte):
+    # change inputs on the falling edge so RTL and gate-level runs agree on
+    # which rising edge first sees them
+    await FallingEdge(dut.clk)
     dut.ui_in.value = byte
-    await ClockCycles(dut.clk, 2)
+    await ClockCycles(dut.clk, 2, rising=False)
     dut.load_strobe.value = 1
-    await ClockCycles(dut.clk, 3)
+    await ClockCycles(dut.clk, 3, rising=False)
     dut.load_strobe.value = 0
-    await ClockCycles(dut.clk, 3)
+    await ClockCycles(dut.clk, 3, rising=False)
 
 
 @cocotb.test()
@@ -58,7 +61,7 @@ async def test_i2c_three_roles_one_binary(dut):
             await send(dut, 0x08)
             await send(dut, core)
             await send(dut, byte)
-            await ClockCycles(dut.clk, 2)
+            await ClockCycles(dut.clk, 2, rising=False)
             v = int(dut.uo_out.value)
             got += [(v >> j) & 1 for j in range(8)]
         for j, w in enumerate(want):
