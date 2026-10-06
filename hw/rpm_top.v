@@ -186,17 +186,22 @@ module tt_um_relwire #(
   wire [25:0] instr;
   reg [25:0] ireg[0:NC-1];  // per-core instruction registers
   wire [2*NW-1:0] res = {wres[3], wres[2], wres[1], wres[0]};
-  wire [15:0] ka = kt[ksa[exec_core]], kb = kt[ksb[exec_core]];
+  // Each core reads the shared table through its own two ports. A single
+  // pair steered by the executing core is functionally fine but gives static
+  // timing a die-wide path from one core's instruction into every other core.
+  wire [15:0] ka[0:NC-1], kb[0:NC-1];
 
   genvar g;
   generate
     for (g = 0; g < NC; g = g + 1) begin : core
+      assign ka[g] = kt[ksa[g]];
+      assign kb[g] = kt[ksb[g]];
       rpm_core #(.NW(NW)) u (
           .clk(clk), .rst(cores_rst), .clr(!rst_n), .exec_en(executing && exec_core == g),
           .tick(tick), .now(now), .prev(prev), .res(res), .instr(ireg[g]),
           .role_mask(masks[g]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
           .ev_valid(ev_valid[g]), .ev_code(ev_code[g]), .ev_addr(ev_addr[g]),
-          .halted(halted[g]), .ksel_a(ksa[g]), .ksel_b(ksb[g]), .ka(ka), .kb(kb),
+          .halted(halted[g]), .ksel_a(ksa[g]), .ksel_b(ksb[g]), .ka(ka[g]), .kb(kb[g]),
           .ld_we(ld_we && ld_core == g), .ld_byte(ld_byte), .ld_data(ld_data),
           .dmem(dmem[g]));
     end
