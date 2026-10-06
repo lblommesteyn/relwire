@@ -78,8 +78,8 @@ loop one iteration short) are caught.
 
 ### Top level and physical design
 
-`hw/rpm_top.v` (`tt_um_relwire`) puts 4 cores on one single-port IHP SRAM
-(`RM_IHPSG13_1P_256x48`) with time-multiplexed fetch, a shared constant table, a
+`hw/rpm_top.v` (`tt_um_relwire`) puts 4 cores on one single-port program memory
+(128 x 26 flip-flops) with time-multiplexed fetch, a shared constant table, a
 2-flop synchronizer on the protocol pins, a byte-wide loader on
 `ui_in`/`uio_in[7:6]`, and readback on `uo_out`.
 
@@ -94,15 +94,24 @@ The differential test drives this top level at the pins against the
 single-issue reference model: it programs the chip through the loader, runs,
 and reads data memory back.
 
-`hw/pnr/` (OpenROAD, IHP sg13g2 slow corner 1.08 V / 125 C, 50 MHz, 1200 x 600
-um die, no power grid):
+### Tiny Tapeout CMOS5L hardening
+
+`tapeout/` is the Tiny Tapeout project (6x4 tiles, `ihp-sg13cmos5l`). `setup_local.sh`
+and `harden.sh` mirror `TinyTapeout/tt-gds-action@ihp-cmos5l` locally (pinned
+IHP-Open-PDK, LibreLane 3.1.0.dev3 in Docker). The program memory is flip-flops,
+not an IHP SRAM macro: CMOS5L user designs may not use TopMetal1, so the macro's
+Metal4 power pins cannot reach the Metal4-only power grid.
 
 | | |
 |---|---|
-| cells (synthesis) | 15,416 + SRAM macro |
-| placed area | 299,283 um2, 43% utilization |
-| setup | met, worst slack +4.01 ns (SRAM read to core flop) |
-| hold | met after repair, worst slack +0.24 ns |
+| Tiny Tapeout precheck | **passed** (KLayout CMOS5L DRC, pins, boundary, layers, cells) |
+| DRC (router, Magic) | 0 |
+| LVS | 0 errors |
+| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +1.14 ns |
+| hold, fast corner | met, +0.10 ns |
+| utilization | 64% of 1289 x 711 um |
+| antenna | 0 |
+| open warnings | 242 max-slew, 7 max-cap (slow corner) |
 
 Open questions: a data override demotes the whole role while a time override
 flips only that edge;
