@@ -1,0 +1,4 @@
+(executable
+ (name gen_tt_test)
+ (libraries relwire_lib)
+ (flags (:standard -warn-error -a)))
