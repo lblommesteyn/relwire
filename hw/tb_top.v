@@ -41,7 +41,7 @@ module tb_top;
   always @(posedge clk) begin
     #0.1;
     if (rst_n && dut.run) begin
-      if (dut.slot == 2 && dut.tick < ticks) begin
+      if (dut.slot == dut.CAPTURE && dut.tick < ticks) begin
         $fwrite(ft, "%0d ", dut.tick);
         for (w = 0; w < nwires; w = w + 1)
           if (!uio_oe[w] && cfg[w][5]) $fwrite(ft, "x");  // undriven, floating

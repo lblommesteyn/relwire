@@ -43,7 +43,7 @@ let scenario name prog ~ticks (cores : (assignment * (string * string) list) lis
   run (Printf.sprintf "mkdir -p %s" dir);
   let mk () =
     List.mapi
-      (fun i (asg, inputs) -> (asg, make_agent ~name:(string_of_int i) prog asg ~inputs:(List.map (fun (f, v) -> (f, bits v)) inputs)))
+      (fun i (asg, inputs) -> (asg, make_agent ~issue:1 ~name:(string_of_int i) prog asg ~inputs:(List.map (fun (f, v) -> (f, bits v)) inputs)))
       cores
   in
   let fresh = mk () in
@@ -113,7 +113,7 @@ let () =
        root);
   let ctrl a = (Run_as [ "controller" ], [ ("addr", a) ]) in
   let tgt = (Run_as [ "target" ], [ ("ack", "0") ]) in
-  print_endline "RTL (tt_um_relwire, 4 cores, shared SRAM, programmed over pins) vs reference model";
+  print_endline "RTL (tt_um_relwire: 4 cores, single issue, synchronized pins, shared SRAM, programmed over pins) vs single-issue reference model";
   scenario "i2c_arbitration" I2c.address_byte ~ticks:2000
     [ ctrl "10110110"; ctrl "10100110"; tgt; (Observe_all, []) ];
   scenario "i2c_write" I2c.write_transaction ~ticks:2500

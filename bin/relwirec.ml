@@ -31,7 +31,7 @@ let pp_instr = function
   | IToggle { wire; field; bit; time; own = o; nominal; min_after; max_after; _ } ->
       Printf.sprintf "%stoggle %s %s[%d] @%s at %d in [%d, %d]" (own o) wire field bit time
         nominal min_after max_after
-  | IBranch _ | IJump _ -> assert false
+  | IBranch _ | IJump _ | INop -> assert false
 
 let pp_instr = function
   | IBranch { cond = Run { wire; n; set }; skip } ->
@@ -40,6 +40,7 @@ let pp_instr = function
   | IBranch { cond = Bit { field; bit; level }; skip } ->
       Printf.sprintf "      if %s[%d] == %s else skip %d" field bit (lvl level) skip
   | IJump n -> Printf.sprintf "      skip %d" n
+  | INop -> "      loop setup"
   | i -> pp_instr i
 
 let print_machine title m =

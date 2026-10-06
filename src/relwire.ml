@@ -109,6 +109,7 @@ type instr =
   | IToggle of { wire : string; field : string; bit : int; time : string; role : role;
                  own : own; nominal : int; min_after : int; max_after : int }
   | IBranch of { cond : cond; skip : int }  (* false: skip the next [skip] *)
+  | INop  (* where the hardware sets up a loop: free, or one tick at single issue *)
   | IJump of int
 
 and cond =
@@ -138,6 +139,9 @@ let specialize prog assignment =
     | Loop v -> List.assoc v env
   in
   (* [sampled]: field bits bound on every path so far (the branch lint). *)
+  (* [looped]: inside a repeat the hardware runs as its loop (the outermost
+     one); deeper repeats are unrolled by the compiler too *)
+  let looped = ref false in
   let rec go env sampled stmts =
     List.fold_left
       (fun (acc, sampled) st ->
@@ -166,13 +170,17 @@ let specialize prog assignment =
         ([ ISample { wire; field; bit; role; own = own_of role } ], (field, bit) :: sampled)
     | After { time; ticks } -> ([ IAfter { time; ticks } ], sampled)
     | Repeat { var; count; body } ->
+        let outer = not !looped in
+        looped := true;
         let rec loop i acc sampled =
           if i = count then (acc, sampled)
           else
             let out, sampled = go ((var, i) :: env) sampled body in
             loop (i + 1) (acc @ out) sampled
         in
-        loop 0 [] sampled
+        let out, sampled = loop 0 [] sampled in
+        if outer then looped := false;
+        ((if outer then [ INop ] else []) @ out, sampled)
     | If_run { wire; n; set; body } ->
         let b, _ = go env sampled body in
         (IBranch { cond = Run { wire; n; set }; skip = List.length b } :: b, sampled)
@@ -316,6 +324,7 @@ let step a ~tick ~now ~prev =
          in
          a.pc <- a.pc + (if taken then 1 else skip + 1)
      | IJump n -> a.pc <- a.pc + n + 1
+     | INop -> a.pc <- a.pc + 1
      | IAfter { ticks; _ } ->
          if tick >= a.anchor + scaled a ticks then begin
            a.anchor <- tick; a.pc <- a.pc + 1
@@ -396,7 +405,9 @@ let step a ~tick ~now ~prev =
       match a.issue with Some k when !issued >= k -> continue := false | _ -> ()
     end
   done;
-  if a.pc >= Array.length a.machine then release_all a
+  (* finishing is an implicit halt: it needs an issue slot of its own *)
+  let slot_left = match a.issue with Some k -> !issued < k | None -> true in
+  if a.pc >= Array.length a.machine && slot_left then release_all a
 
 (* ---------- simulation ---------- *)
 
@@ -545,7 +556,7 @@ let schedule ?(io = ideal_io) prog assignment =
       | IAfter { time; ticks } ->
           push pc { label = At time; wire = None; kind = KTimer ticks; delta = (0, 0);
                     mine = true; succ = [] }
-      | ISample _ | IBranch _ | IJump _ -> ())
+      | ISample _ | IBranch _ | IJump _ | INop -> ())
     m;
   let evs = Array.of_list (List.rev !evs) in
   let flow pc =

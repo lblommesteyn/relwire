@@ -7,10 +7,13 @@
 // Protocol wires: uio[3:0]. Loader: byte on ui_in, strobe on uio_in[7]
 // (rising edge), frame reset on uio_in[6]. Status / readback on uo_out.
 //
-// Tick schedule (T = 3 + EXEC*NC cycles): slot 0 commits the cores' drives
-// to the pins, slot 1 latches the pins as this tick's bus value, then EXEC
-// rounds of NC exec slots. The SRAM is read one slot ahead of the core that
-// executes, so each core gets EXEC instructions per tick.
+// Tick schedule (T = 3 + SYNC + EXEC*NC cycles): slot 0 commits the cores'
+// drives to the pins; the pins pass a SYNC-flop synchronizer (external
+// devices are asynchronous) and are latched as this tick's bus value at slot
+// 1 + SYNC; then EXEC rounds of NC exec slots. The SRAM is read one slot
+// ahead of the core that executes, so each core gets EXEC instructions per
+// tick. EXEC = 1 is single issue: every instruction costs one tick, which
+// the timing certificate accounts for (certify ~issue:1).
 //
 // Loader commands (first byte), arguments follow:
 //   01 addr b3 b2 b1 b0   program word (low 26 bits)
@@ -23,7 +26,8 @@
 
 module tt_um_relwire #(
     parameter NC = 4,
-    parameter EXEC = 4
+    parameter EXEC = 1,
+    parameter SYNC = 2
 ) (
     input wire [7:0] ui_in,
     output wire [7:0] uo_out,
@@ -35,7 +39,9 @@ module tt_um_relwire #(
     input wire rst_n
 );
   localparam NW = 4;
-  localparam T = 3 + EXEC * NC;
+  localparam T = 3 + SYNC + EXEC * NC;
+  localparam LATCH = 1 + SYNC;  // slot at which the bus value is latched
+  localparam CAPTURE = LATCH + 1;  // first slot at which [now] holds it
   localparam CB = $clog2(NC);
 
   // ---------------- loader ----------------
@@ -134,6 +140,13 @@ module tt_um_relwire #(
   reg [NW-1:0] now, prev;
   reg [NW-1:0] pin_oe, pin_out;
   wire cores_rst = !rst_n || !run;
+  reg [NW-1:0] sync_r[0:SYNC-1];
+  integer si;
+  always @(posedge clk) begin
+    sync_r[0] <= uio_in[NW-1:0];
+    for (si = 1; si < SYNC; si = si + 1) sync_r[si] <= sync_r[si-1];
+  end
+  wire [NW-1:0] pins_in = sync_r[SYNC-1];
 
   always @(posedge clk) begin
     if (cores_rst) begin
@@ -142,17 +155,17 @@ module tt_um_relwire #(
     end else begin
       slot <= (slot == T - 1) ? 0 : slot + 1'b1;
       if (slot == T - 1) tick <= tick + 1'b1;
-      if (slot == 1) begin
-        prev <= (tick == 0) ? uio_in[NW-1:0] : now;
-        now <= uio_in[NW-1:0];
+      if (slot == LATCH) begin
+        prev <= (tick == 0) ? pins_in : now;
+        now <= pins_in;
       end
     end
   end
 
-  wire fetching = slot >= 2 && slot < 2 + EXEC * NC;
-  wire executing = slot >= 3;
-  wire [CB-1:0] fetch_core = (slot - 2) % NC;
-  wire [CB-1:0] exec_core = (slot - 3) % NC;
+  wire fetching = slot >= LATCH + 1 && slot < LATCH + 1 + EXEC * NC;
+  wire executing = slot >= LATCH + 2;
+  wire [CB-1:0] fetch_core = (slot - (LATCH + 1)) % NC;
+  wire [CB-1:0] exec_core = (slot - (LATCH + 2)) % NC;
 
   // ---------------- cores ----------------
   wire [7:0] pc[0:NC-1];
@@ -192,16 +205,17 @@ module tt_um_relwire #(
       .A_BIST_REN(1'b0), .A_BIST_ADDR(8'b0), .A_BIST_DIN(48'b0), .A_BIST_BM(48'b0));
 
   // ---------------- pins ----------------
+  // one loop variable per always block: a shared one would have two drivers
   reg [NW-1:0] any0, any1, anyoe;
-  integer c, w;
+  integer ca, wp, cs;
   always @* begin
     any0 = 0;
     any1 = 0;
     anyoe = 0;
-    for (c = 0; c < NC; c = c + 1) begin
-      any0 = any0 | (oe[c] & ~out[c]);
-      any1 = any1 | (oe[c] & out[c]);
-      anyoe = anyoe | oe[c];
+    for (ca = 0; ca < NC; ca = ca + 1) begin
+      any0 = any0 | (oe[ca] & ~out[ca]);
+      any1 = any1 | (oe[ca] & out[ca]);
+      anyoe = anyoe | oe[ca];
     end
   end
 
@@ -210,11 +224,11 @@ module tt_um_relwire #(
       pin_oe <= 0;
       pin_out <= 0;
     end else if (slot == 0) begin
-      for (w = 0; w < NW; w = w + 1)
-        case (wres[w])
-          2'd1: begin pin_oe[w] <= any0[w]; pin_out[w] <= 1'b0; end
-          2'd2: begin pin_oe[w] <= any1[w]; pin_out[w] <= 1'b1; end
-          default: begin pin_oe[w] <= anyoe[w]; pin_out[w] <= any1[w]; end
+      for (wp = 0; wp < NW; wp = wp + 1)
+        case (wres[wp])
+          2'd1: begin pin_oe[wp] <= any0[wp]; pin_out[wp] <= 1'b0; end
+          2'd2: begin pin_oe[wp] <= any1[wp]; pin_out[wp] <= 1'b1; end
+          default: begin pin_oe[wp] <= anyoe[wp]; pin_out[wp] <= any1[wp]; end
         endcase
     end
   end
@@ -226,10 +240,10 @@ module tt_um_relwire #(
   reg [2:0] last_code;
   reg [CB-1:0] last_core;
   always @(posedge clk)
-    for (c = 0; c < NC; c = c + 1)
-      if (ev_valid[c]) begin
-        last_code <= ev_code[c];
-        last_core <= c;
+    for (cs = 0; cs < NC; cs = cs + 1)
+      if (ev_valid[cs]) begin
+        last_code <= ev_code[cs];
+        last_core <= cs[CB-1:0];
       end
 
   wire all_halted = halted[0] & halted[1] & (NC < 3 || halted[2]) & (NC < 4 || halted[3]);
