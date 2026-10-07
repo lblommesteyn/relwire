@@ -9,7 +9,7 @@ target on another, and a protocol checker on a third. Lost arbitration hands a c
 role over to observation at run time. Timing values live in a shared table, so a
 program's speed is data.
 
-Each protocol tick is 10 clock cycles (250 ns at 40 MHz); every instruction takes one tick.
+Each protocol tick is 11 clock cycles (275 ns at 40 MHz); every instruction takes one tick.
 
 ## How to test
 

@@ -5,4 +5,4 @@ WIRES = [("SCL", 1), ("SDA", 1)]  # (name, 0 push-pull / 1 dominant-low / 2 domi
 LAYOUT = {"addr": (0, 8), "ack": (8, 1), "data": (9, 8), "ack2": (17, 1), "stop_lo": (18, 1)}  # field: (first data-memory bit, width)
 LITS = {"stop_lo": 0}
 ROLES = {"controller": 0, "target": 1}
-TICK_CYCLES = 10
+TICK_CYCLES = 11

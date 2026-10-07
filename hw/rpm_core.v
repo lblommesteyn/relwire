@@ -37,6 +37,7 @@ module rpm_core #(
     input wire clk,
     input wire rst,
     input wire clr,  // power-on clear of data memory (rst alone keeps it for the loader)
+    input wire pre_en,  // predecode: the cycle before this core executes
     input wire exec_en,
     input wire [15:0] tick,
     input wire [NW-1:0] now,
@@ -97,6 +98,27 @@ module rpm_core #(
   wire dbit = dmem[addr[5:0]];
   wire [1:0] rw = res[2*w+:2];
 
+  // Predecode. Everything the execute cycle tests is stable for the whole
+  // tick before it (the core's state only changes when it executes), so it is
+  // computed one cycle early into registers: the execute cycle is then a short
+  // next-state mux instead of decode, a 16-bit subtract and compares.
+  reg [6:0] p_addr;
+  reg p_bus, p_rose, p_dbit, p_ge_a, p_dl, p_run, p_last, p_tne;
+  reg [1:0] p_rw;
+  always @(posedge clk)
+    if (pre_en) begin
+      p_addr <= addr;
+      p_bus <= bus;
+      p_rose <= rose;
+      p_dbit <= dbit;
+      p_rw <= rw;
+      p_ge_a <= d >= ka;                      // EDGE min, AFTER, TOGGLE nominal/min
+      p_dl <= kb != INF && d > kb;            // EDGE max, TOGGLE max: deadline passed
+      p_run <= run_len[w] >= instr[15:13];    // BRANCH_RUN
+      p_last <= last[w];
+      p_tne <= tick != t0;
+    end
+
   function [1:0] drv(input [1:0] r, input v);
     case (r)
       2'd1: drv = v ? 2'b00 : 2'b10;
@@ -142,7 +164,7 @@ module rpm_core #(
   task drive(input v);
     reg [1:0] p;
     begin
-      p = drv(rw, v);
+      p = drv(p_rw, v);
       oe[w] <= p[1];
       out[w] <= p[0];
     end
@@ -150,8 +172,8 @@ module rpm_core #(
 
   task lose;
     begin
-      dmem[addr[5:0]] <= bus;
-      emit(3'd3, addr);
+      dmem[p_addr[5:0]] <= p_bus;
+      emit(3'd3, p_addr);
       demoted[role] <= 1'b1;
       oe <= 0;
     end
@@ -181,39 +203,39 @@ module rpm_core #(
           halted <= 1'b1;
         end
         4'd2: begin  // PUT
-          if (sup) drive(dbit ^ lvl);
+          if (sup) drive(p_dbit ^ lvl);
           else oe[w] <= 1'b0;
           goto(pc + 1'b1);
         end
         4'd3: begin  // SAMPLE
-          if (run_len[w] != 0 && last[w] == bus) begin
+          if (run_len[w] != 0 && last[w] == p_bus) begin
             if (run_len[w] != 3'd7) run_len[w] <= run_len[w] + 1'b1;
           end else run_len[w] <= 3'd1;
-          last[w] <= bus;
+          last[w] <= p_bus;
           if (sup) begin
-            if (dbit == bus) emit(3'd1, addr);
+            if (p_dbit == p_bus) emit(3'd1, p_addr);
             else lose;
-          end else if (lit && dbit != bus) emit(3'd7, addr);
-          else dmem[addr[5:0]] <= bus;
+          end else if (lit && p_dbit != p_bus) emit(3'd7, p_addr);
+          else dmem[p_addr[5:0]] <= p_bus;
           goto(pc + 1'b1);
         end
         4'd4: begin  // AFTER
-          if (d >= k_hi) begin
+          if (p_ge_a) begin
             anchor <= tick;
             goto(pc + 1'b1);
           end
         end
         4'd1, 4'd5: begin  // EDGE, TOGGLE
           if (phase == READY && sup) begin
-            if (d >= (op == 4'd1 ? k_hi : tg_nom)) begin
-              drive(op == 4'd1 ? lvl : dbit);
+            if (p_ge_a) begin
+              drive(op == 4'd1 ? lvl : p_dbit);
               t0 <= tick;
               phase <= DRIVEN;
             end
           end else if (phase == DRIVEN) begin
-            if (tick != t0) begin
+            if (p_tne) begin
               if (op == 4'd1) begin
-                if (bus == lvl) begin
+                if (p_bus == lvl) begin
                   emit(3'd1, 7'd0);
                   finish;
                 end else begin
@@ -223,40 +245,40 @@ module rpm_core #(
               end else begin
                 // a data edge must actually transition: the right level with
                 // no transition is a collision (the symbol never reached the wire)
-                if (!rose) begin  // no transition: collision, adopt nothing
-                  emit(3'd6, addr);
+                if (!p_rose) begin  // no transition: collision, adopt nothing
+                  emit(3'd6, p_addr);
                   demoted[role] <= 1'b1;
                   oe <= 0;
-                end else if (bus == dbit) emit(3'd1, addr);
+                end else if (p_bus == p_dbit) emit(3'd1, p_addr);
                 else lose;
                 finish;
               end
             end
           end else if (op == 4'd1) begin  // observed / awaiting edge
-            if (bus == lvl && rose) begin
-              if (d < k_hi) emit(3'd5, 7'd0);
+            if (p_bus == lvl && p_rose) begin
+              if (!p_ge_a) emit(3'd5, 7'd0);
               finish;
-            end else if (k_lo != INF && d > k_lo) begin
+            end else if (p_dl) begin
               emit(3'd4, 7'd0);
               finish;
             end
           end else begin  // observed toggle: blanked before min, deadline max
-            if (tg_max != INF && d > tg_max) begin
+            if (p_dl) begin
               emit(3'd4, 7'd0);
               finish;
-            end else if (d >= tg_min && rose) begin
-              dmem[addr[5:0]] <= bus;
+            end else if (p_ge_a && p_rose) begin
+              dmem[p_addr[5:0]] <= p_bus;
               finish;
             end
           end
         end
         4'd6: begin  // BRANCH_RUN
-          if (run_len[w] >= instr[15:13]) begin
-            if (instr[12]) dmem[instr[10:5]] <= ~last[w];
+          if (p_run) begin
+            if (instr[12]) dmem[instr[10:5]] <= ~p_last;
             goto(pc + 1'b1);
           end else goto(pc + 1'b1 + instr[4:0]);
         end
-        4'd7: goto((dbit == lvl) ? pc + 1'b1 : pc + 1'b1 + instr[6:0]);  // BRANCH_BIT
+        4'd7: goto((p_dbit == lvl) ? pc + 1'b1 : pc + 1'b1 + instr[6:0]);  // BRANCH_BIT
         4'd8: goto(pc + 1'b1 + instr[9:0]);  // JUMP
         4'd9: begin  // LOOP
           lactive <= 1'b1;

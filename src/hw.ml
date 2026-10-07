@@ -278,6 +278,6 @@ let image_py ?(source = "") prog =
   pr "ROLES = {%s}
 "
     (String.concat ", " (List.map (fun (r, i) -> Printf.sprintf "\"%s\": %d" r i) (role_ids prog)));
-  pr "TICK_CYCLES = 10
+  pr "TICK_CYCLES = 11
 ";
   Buffer.contents b

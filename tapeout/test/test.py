@@ -11,7 +11,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, FallingEdge
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TICK_CYCLES = 10  # 4 + 2 (pin synchronizer) + 4 cores
+TICK_CYCLES = 11  # 5 + 2 (pin synchronizer) + 4 cores
 
 
 def read_vectors():

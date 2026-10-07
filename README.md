@@ -41,14 +41,14 @@ $ relwirec examples/i2c.rw --role controller     # what the controller executes
 $ relwirec examples/i2c.rw --role target
 $ relwirec examples/i2c.rw --observe             # passive analyzer / checker
 $ relwirec examples/i2c_ns.rw --tick-ns 250 --certify controller --issue 1
-i2c_ns.rw, role controller, 250 ns/tick, io sync=0 out=0 skew=0 jitter=0, issue 1
+i2c_ns.rw, role controller, 275 ns/tick, io sync=0 out=0 skew=0 jitter=0, issue 1
   constraint       spec             guaranteed     margin
-  tHD;STA        600ns           1000ns             +400ns  PASS (1)
-  tLOW          1300ns           1750ns..inf        +450ns  PASS (19)
-  tHIGH          600ns           1000ns             +400ns  PASS (18)
-  tSU;DAT        100ns           1000ns..inf        +900ns  PASS assumes peer (19)
-  tHD;DAT          0ns            500ns..750        +500ns  PASS assumes peer (19)
-  tSU;STO        600ns           1000ns..inf        +400ns  PASS (1)
+  tHD;STA        600ns           1100ns             +500ns  PASS (1)
+  tLOW          1300ns           1650ns..inf        +350ns  PASS (19)
+  tHIGH          600ns           1100ns             +500ns  PASS (18)
+  tSU;DAT        100ns            825ns..inf        +725ns  PASS assumes peer (19)
+  tHD;DAT          0ns            550ns..825        +550ns  PASS assumes peer (19)
+  tSU;STO        600ns           1100ns..inf        +500ns  PASS (1)
   PASS
 ```
 
