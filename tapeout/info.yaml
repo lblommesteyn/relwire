@@ -5,7 +5,7 @@ project:
   discord:      ""
   description:  "Four protocol cores running one relational program: controller, target and sniffer from the same binary"
   language:     "Verilog"
-  clock_hz:     50000000
+  clock_hz:     40000000
   tiles: "6x4"
   top_module:  "tt_um_relwire"
   source_files:

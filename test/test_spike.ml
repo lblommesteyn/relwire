@@ -485,11 +485,11 @@ let () =
   check "i2c_ns.rw at 20 ns compiles to the same program as i2c.rw"
     ({ n20 with constraints = [] } = { wt with constraints = [] }
      && List.map (fun c -> c.min_ticks) n20.constraints = List.map (fun c -> c.min_ticks) wt.constraints);
-  let n180 = Rw_parse.program_of_file ~tick_ns:200 "../examples/i2c_ns.rw" in
+  let n180 = Rw_parse.program_of_file ~tick_ns:250 "../examples/i2c_ns.rw" in
   let c180 = certify ~issue:1 n180 (Run_as [ "controller" ]) in
-  print_certificate ~tick_ns:200 "  i2c_ns.rw on the chip: 200 ns tick, single issue" c180;
+  print_certificate ~tick_ns:250 "  i2c_ns.rw on the chip: 250 ns tick (40 MHz), single issue" c180;
   check "Fast-mode spec holds at the chip's tick, in real nanoseconds"
-    (List.for_all (fun l -> l.pass && l.guaranteed.lo * 200 >= Option.get l.constr.spec_ns) c180);
+    (List.for_all (fun l -> l.pass && l.guaranteed.lo * 250 >= Option.get l.constr.spec_ns) c180);
   check "and no reaction hazards on the chip" (reaction_hazards n180 (Run_as [ "controller" ]) = []
                                                 && reaction_hazards n180 (Run_as [ "target" ]) = []);
 

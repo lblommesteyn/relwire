@@ -84,7 +84,7 @@ loop one iteration short) are caught.
 `ui_in`/`uio_in[7:6]`, and readback on `uo_out`.
 
 **Single issue.** Each core executes one instruction per tick; a tick is
-4 + 2 (sync) + 4 (cores) = 10 cycles, 200 ns at 50 MHz (one cycle parks each
+4 + 2 (sync) + 4 (cores) = 10 cycles, 250 ns at 40 MHz (one cycle parks each
 core's instruction in a local register, so decode does not run off a bus that spans
 the die). Every instruction,
 including loop setup and the final halt, costs a tick, and the timing
