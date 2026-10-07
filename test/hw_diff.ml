@@ -169,6 +169,24 @@ let () =
               ~ticks:4000 cores)
       [ false; true ]
   done;
+  (* the Manchester-style family: data edges, collisions instead of arbitration *)
+  for seed = 1 to 8 do
+    List.iter
+      (fun arbitrate ->
+        let st = Random.State.make [| seed; 7 |] in
+        let spec = Gen.generate_toggle st in
+        let inp r = List.map (fun (f, v) -> (f, bits_s v)) (Gen.random_inputs st spec r) in
+        let ia = inp "a" and ib = inp "b" and ic = inp "c" and ia2 = inp "a" in
+        incr ran;
+        let cores =
+          [ (Run_as [ "a" ], ia) ]
+          @ (if arbitrate then [ (Run_as [ "a" ], ia2) ] else [ (Run_as [ "b" ], ib) ])
+          @ [ (Run_as [ "c" ], ic); (Observe_all, []) ]
+        in
+        scenario (Printf.sprintf "tog%02d%s" seed (if arbitrate then "_coll" else "")) spec.prog
+          ~ticks:3000 cores)
+      [ false; true ]
+  done;
   Printf.printf "  %d random programs on the RTL, %d skipped (larger than 128 words)
 " !ran !skipped;
 

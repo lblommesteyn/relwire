@@ -217,6 +217,8 @@ type outcome =
   | Early_edge
   | Bad_wire          (* sampled Float or Contention *)
   | Mismatch          (* observed wire contradicts a literal *)
+  | Collision         (* supplied data edge did not happen: the wire was
+                         already at its level, so the symbol was destroyed *)
 
 type event = { tick : int; outcome : outcome; var : string; bit : int }
 
@@ -352,7 +354,18 @@ let step a ~tick ~now ~prev =
              end;
              continue := false
          | Driven t0, _ when tick > t0 + a.out_delay + a.in_sync ->
+             (* A data edge carries its bit as the transition itself. No
+                transition means another transmitter held the line through
+                the cell: no symbol reached the wire, so every transmitter
+                reports a Collision and nobody adopts a value from the cell.
+                Level-encoded bits can arbitrate; transition-encoded ones can
+                only collide. Either way the transmitter stops. *)
              (match now wire with
+              | V lv when now wire = prev wire ->
+                  ignore lv;
+                  log a tick Collision field bit;
+                  a.demoted <- role :: a.demoted;
+                  release_all a
               | V lv when cell.(bit) = Some lv -> log a tick Match field bit
               | V lv ->
                   cell.(bit) <- Some lv;

@@ -23,7 +23,7 @@ let values a (spec : Gen.spec) =
 let clean a =
   List.for_all
     (fun o -> outcomes a o = [])
-    [ Deadline_missed; Early_edge; Bad_wire; Mismatch ]
+    [ Deadline_missed; Early_edge; Bad_wire; Mismatch; Collision ]
 
 let done_ a = a.pc = Array.length a.machine
 
@@ -45,8 +45,8 @@ let fidelity (spec : Gen.spec) inputs_of vals =
                (List.init (String.length got) Fun.id))
     spec.fields
 
-let run_case st seed ~issue ~arbitrate =
-  let spec = Gen.generate st in
+let run_case ?(gen = Gen.generate) st seed ~issue ~arbitrate =
+  let spec = gen st in
   let p = spec.prog in
   let inputs = List.map (fun r -> (r, Gen.random_inputs st spec r)) Gen.roles in
   let a2_inputs = Gen.random_inputs st spec "a" in
@@ -58,9 +58,37 @@ let run_case st seed ~issue ~arbitrate =
   let agents = (a :: a2) @ [ b; c; o ] in
   let ticks = 40_000 in
   let tr = simulate ~wires:p.wires ~agents ~ticks () in
-  let tag = Printf.sprintf "seed %d%s%s" seed
+  let tag = Printf.sprintf "%s seed %d%s%s" (if gen == Gen.generate then "bus" else "toggle") seed
       (if issue = None then "" else " issue1") (if arbitrate then " arb" else "") in
-  check (tag ^ ": all finish cleanly") (List.for_all (fun x -> done_ x && clean x) agents);
+  (* Level-encoded bits arbitrate; transition-encoded bits (toggle) can only
+     collide. Colliding transmitters must not diverge silently: if anyone
+     fails to decode, a transmitter flagged a Collision, and every agent that
+     finished clean agrees with every other on the bits both hold. *)
+  let collisions_allowed = arbitrate && gen != Gen.generate in
+  check (tag ^ ": all finish") (List.for_all done_ agents);
+  if not collisions_allowed then
+    check (tag ^ ": all finish cleanly") (List.for_all clean agents)
+  else begin
+    let flagged = List.exists (fun x -> outcomes x Collision <> []) agents in
+    check (tag ^ ": a decode failure is always flagged by a transmitter")
+      (List.for_all clean agents || flagged);
+    let cl = List.filter clean agents in
+    check (tag ^ ": clean agents agree")
+      (List.for_all
+         (fun x ->
+           List.for_all
+             (fun y ->
+               List.for_all
+                 (fun (f, xv) ->
+                   let yv = List.assoc f (values y spec) in
+                   List.for_all
+                     (fun k -> xv.[k] = '?' || yv.[k] = '?' || xv.[k] = yv.[k])
+                     (List.init (String.length xv) Fun.id))
+                 (values x spec))
+             cl)
+         cl)
+  end;
+  if not collisions_allowed then begin
   let v0 = values o spec in
   (* agreement on what crossed the wire: where the observer bound a bit,
      every agent holds the same value; where it did not, only the owning
@@ -93,8 +121,9 @@ let run_case st seed ~issue ~arbitrate =
    | _ -> ());
   let o2 = make_agent ?issue ~name:"o2" p Observe_all ~inputs:[] in
   ignore (simulate ~wires:p.wires ~agents:[ o2 ] ~raw:[ replay tr p.wires ] ~ticks:(ticks + 10) ());
-  check (tag ^ ": replayed bus decodes the same") (values o2 spec = v0 && clean o2);
-  let lost = List.exists (fun x -> outcomes x Arbitration_lost <> []) agents in
+  check (tag ^ ": replayed bus decodes the same") (values o2 spec = v0 && clean o2)
+  end;
+  let lost = List.exists (fun x -> outcomes x Arbitration_lost <> [] || outcomes x Collision <> []) agents in
   lost
 
 let () =
@@ -106,9 +135,17 @@ let () =
         let st = Random.State.make [| seed |] in
         incr cases;
         if run_case st seed ~issue ~arbitrate then incr losses)
+      [ (None, false); (Some 1, false); (None, true); (Some 1, true) ];
+    List.iter
+      (fun (issue, arbitrate) ->
+        let st = Random.State.make [| seed; 7 |] in
+        incr cases;
+        if run_case ~gen:Gen.generate_toggle st seed ~issue ~arbitrate then incr losses)
       [ (None, false); (Some 1, false); (None, true); (Some 1, true) ]
   done;
-  Printf.printf "projection fuzz: %d programs x 4 configurations = %d runs, %d with a lost arbitration\n"
+  Printf.printf
+    "projection fuzz: %d seeds x 2 program families x 4 configurations = %d runs, %d with a lost arbitration or collision
+"
     n !cases !losses;
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

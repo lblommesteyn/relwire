@@ -48,7 +48,7 @@ module rpm_core #(
     output reg [NW-1:0] oe,
     output reg [NW-1:0] out,
     output reg ev_valid,
-    output reg [2:0] ev_code,  // 1 match 2 peer 3 arb 4 deadline 5 early 7 mismatch
+    output reg [2:0] ev_code,  // 1 match 2 peer 3 arb 4 deadline 5 early 6 collision 7 mismatch
     output reg [6:0] ev_addr,
     output reg halted,
     // two read ports into the shared constant table
@@ -221,7 +221,13 @@ module rpm_core #(
                   phase <= AWAIT;
                 end
               end else begin
-                if (bus == dbit) emit(3'd1, addr);
+                // a data edge must actually transition: the right level with
+                // no transition is a collision (the symbol never reached the wire)
+                if (!rose) begin  // no transition: collision, adopt nothing
+                  emit(3'd6, addr);
+                  demoted[role] <= 1'b1;
+                  oe <= 0;
+                end else if (bus == dbit) emit(3'd1, addr);
                 else lose;
                 finish;
               end

@@ -168,7 +168,7 @@ let hex_data bits =
 
 let outcome_code = function
   | Match -> 1 | Peer_asserted -> 2 | Arbitration_lost -> 3 | Deadline_missed -> 4
-  | Early_edge -> 5 | Bad_wire -> 6 | Mismatch -> 7
+  | Early_edge -> 5 | Bad_wire | Collision -> 6 | Mismatch -> 7
 
 let events prog (a : agent) =
   let lay = layout prog in

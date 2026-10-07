@@ -41,10 +41,17 @@ let generate st =
           List.nth roles (Random.State.int st 3) ))
   in
   let lit_owner = List.nth roles (Random.State.int st 3) in
+  let stuff_owner = List.nth roles (Random.State.int st 3) in
+  (* stuffing-style insertion: after a run of [n] equal bits on SDA, a bit of
+     the opposite level, owned by a random role and checked by the rest *)
+  let stuff () =
+    If_run { wire = "SDA"; n = 2 + Random.State.int st 2; set = Some "stuff";
+             body = cell "stuff" (Const 0) }
+  in
   let sampled = ref [] in
   let pick () = List.nth fields (Random.State.int st nfields) in
   let rec segment depth =
-    match Random.State.int st (if depth > 0 then 3 else 4) with
+    match Random.State.int st (if depth > 0 then 3 else 6) with
     | 0 ->
         (* a few individual cells *)
         let f, w, _ = pick () in
@@ -59,7 +66,8 @@ let generate st =
         let f, w, _ = pick () in
         if depth = 0 then begin
           List.iter (fun k -> sampled := (f, k) :: !sampled) (List.init w Fun.id);
-          [ Repeat { var = "i"; count = w; body = cell f (Loop "i") } ]
+          let body = cell f (Loop "i") @ (if Random.State.bool st then [ stuff () ] else []) in
+          [ Repeat { var = "i"; count = w; body } ]
         end
         else
           List.concat
@@ -69,6 +77,7 @@ let generate st =
     | 2 ->
         (* a literal: its owner drives it, everyone else checks it *)
         cell "lit" (Const 0)
+    | 4 -> [ stuff () ]
     | _ -> (
         (* branch on a bit every role has already sampled *)
         match !sampled with
@@ -93,6 +102,7 @@ let generate st =
       decls =
         List.map (fun (name, width, owner) -> Field { name; width; owner }) fields
         @ [ Lit { name = "lit"; value = L0; owner = lit_owner };
+            Derived { name = "stuff"; owner = stuff_owner };
             Time { name = "start"; owner = "a" };
             Time { name = "rise"; owner = "a" };
             Time { name = "fall"; owner = "a" } ];
@@ -108,3 +118,44 @@ let random_inputs st spec role =
         Some (name, List.init width (fun _ -> if Random.State.bool st then L1 else L0))
       else None)
     spec.fields
+
+(* Second family: Manchester-style data edges on an open-drain line. Each
+   field's owner transmits its bits as mid-cell transitions (toggle), every
+   other role binds them from the transitions and re-anchors on them; the
+   cell boundary is a timer mark. Two agents for one role arbitrate through
+   wired-AND exactly as on a clocked bus. *)
+let half = 25
+
+let generate_toggle st =
+  let nfields = 1 + Random.State.int st 4 in
+  let fields =
+    List.init nfields (fun i ->
+        ( Printf.sprintf "f%d" i,
+          1 + Random.State.int st 6,
+          List.nth roles (Random.State.int st 3) ))
+  in
+  let tog field idx =
+    Toggle { wire = "LINE"; field; idx; time = "mid"; nominal = half;
+             min_after = half / 2; max_after = half + (half / 2) }
+  in
+  let body =
+    [ Edge { wire = "LINE"; level = L0; time = "sof"; min_after = 10; max_after = forever };
+      tog "sync" (Const 0) ]
+    @ List.map
+        (fun (f, w, _) ->
+          Repeat { var = "i"; count = w;
+                   body = [ After { time = "boundary"; ticks = half };
+                            Put_not { wire = "LINE"; field = f; idx = Loop "i" };
+                            tog f (Loop "i") ] })
+        fields
+    @ [ After { time = "end"; ticks = half } ]
+  in
+  let prog =
+    { wires = [ { name = "LINE"; resolution = DominantLow; bias = PullUp } ];
+      decls =
+        List.map (fun (name, width, owner) -> Field { name; width; owner }) fields
+        @ [ Lit { name = "sync"; value = L1; owner = "a" }; Time { name = "sof"; owner = "a" } ];
+      body;
+      constraints = [] }
+  in
+  { prog; fields }

@@ -493,5 +493,34 @@ let () =
   check "and no reaction hazards on the chip" (reaction_hazards n180 (Run_as [ "controller" ]) = []
                                                 && reaction_hazards n180 (Run_as [ "target" ]) = []);
 
+  print_endline "20. ownership transfers at the granularity the wire contradicted";
+  (* message: a lost data bit demotes the role for the rest of the run *)
+  let la = ctrl "LA" "10110110" and lb = ctrl "LB" "10100110" in
+  ignore (simulate ~wires:I2c.wires ~agents:[ la; lb; target () ] ~ticks:2000 ());
+  let lost_at = (List.hd (outcomes la Arbitration_lost)).tick in
+  check "message: after losing, the controller supplies nothing (no Match after the loss)"
+    (List.for_all (fun e -> e.outcome <> Match || e.tick <= lost_at) la.events);
+  (* event: a stretched edge transfers only that edge's time *)
+  let sc = ctrl "SC" "10100110" and st3 = target () in
+  let hold ~tick = if tick >= 820 && tick < 1000 then [ ("SCL", Strong0) ] else [] in
+  ignore (simulate ~wires:I2c.wires ~agents:[ sc; st3 ] ~raw:[ hold ] ~ticks:2500 ());
+  let peer_at = (List.hd (outcomes sc Peer_asserted)).tick in
+  check "event: after a stretch, the controller still drives the next SCL fall itself"
+    (List.exists (fun e -> e.outcome = Match && e.var = "scl_fall" && e.tick > peer_at) sc.events);
+  check "event: and keeps its data role (no demotion, ACK still read)"
+    (outcomes sc Arbitration_lost = [] && field_value sc "ack" = "0");
+  (* symbol: a data edge that never happens is a collision for every transmitter *)
+  let od = { (Manchester.frame 8) with
+             wires = [ { name = "LINE"; resolution = DominantLow; bias = PullUp } ] } in
+  let m1 = make_agent ~name:"M1" od (Run_as [ "tx" ]) ~inputs:[ ("data", bits "10110010") ]
+  and m2 = make_agent ~name:"M2" od (Run_as [ "tx" ]) ~inputs:[ ("data", bits "10010010") ] in
+  ignore (simulate ~wires:od.wires ~agents:[ m1; m2 ] ~ticks:1500 ());
+  check "symbol: both Manchester transmitters report a Collision at the first differing bit"
+    (List.for_all
+       (fun m -> match outcomes m Collision with [ { var = "data"; bit = 2; _ } ] -> true | _ -> false)
+       [ m1; m2 ]);
+  check "symbol: neither claims an arbitration win or loss" 
+    (outcomes m1 Arbitration_lost = [] && outcomes m2 Arbitration_lost = []);
+
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"
