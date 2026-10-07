@@ -14,3 +14,9 @@
   (glob_files %{project_root}/hw/*.v)
   (glob_files %{project_root}/hw/sim/*.v))
  (flags (:standard -warn-error -a)))
+
+(test
+ (name fuzz)
+ (modules fuzz)
+ (libraries relwire_lib)
+ (flags (:standard -warn-error -a)))

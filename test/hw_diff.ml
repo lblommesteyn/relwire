@@ -143,5 +143,34 @@ let () =
       (Run_as [ "tx" ], [ ("id", "00000101111"); ("dlc", "0001"); ("data", "11110000"); ("crc", crc) ]);
       (Run_as [ "rx" ], [ ("ack", "0") ]);
       (Observe_all, []) ];
+  (* Random programs (the projection fuzzer's generator) through the RTL:
+     every role as a core plus an observer, single issue, compiled to one
+     shared binary; with and without a second controller in arbitration. *)
+  print_endline "random programs through the RTL";
+  let bits_s l = String.concat "" (List.map (function L1 -> "1" | L0 -> "0") l) in
+  let ran = ref 0 and skipped = ref 0 in
+  for seed = 1 to 15 do
+    List.iter
+      (fun arbitrate ->
+        let st = Random.State.make [| seed |] in
+        let spec = Gen.generate st in
+        let inp r = List.map (fun (f, v) -> (f, bits_s v)) (Gen.random_inputs st spec r) in
+        let ia = inp "a" and ib = inp "b" and ic = inp "c" and ia2 = inp "a" in
+        match Hw.compile spec.prog with
+        | exception Failure _ -> incr skipped
+        | _ ->
+            incr ran;
+            let cores =
+              [ (Run_as [ "a" ], ia) ]
+              @ (if arbitrate then [ (Run_as [ "a" ], ia2) ] else [ (Run_as [ "b" ], ib) ])
+              @ [ (Run_as [ "c" ], ic); (Observe_all, []) ]
+            in
+            scenario (Printf.sprintf "rand%02d%s" seed (if arbitrate then "_arb" else "")) spec.prog
+              ~ticks:4000 cores)
+      [ false; true ]
+  done;
+  Printf.printf "  %d random programs on the RTL, %d skipped (larger than 128 words)
+" !ran !skipped;
+
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

@@ -4,6 +4,7 @@
      relwirec FILE.rw --role R [...]     machine for role(s) R
      relwirec FILE.rw --observe          passive analyzer machine
      relwirec FILE.rw --certify R [--io SYNC,OUT,SKEW,JITTER] [--tick-ns N] [--issue N]
+   relwirec FILE.rw --emit-image OUT.py   compiled program for host/relwire_tt.py
    --issue 1 certifies the chip's timing (one instruction per tick); the
    default certifies the idealized run-until-blocked semantics. *)
 open Relwire
@@ -52,7 +53,7 @@ let print_machine title m =
 let () =
   let args = List.tl (Array.to_list Sys.argv) in
   let file = ref None and roles = ref [] and observe = ref false
-  and cert = ref None and io = ref ideal_io and tick_ns = ref 20 and issue = ref None in
+  and cert = ref None and io = ref ideal_io and tick_ns = ref 20 and issue = ref None and image = ref None in
   let rec go = function
     | [] -> ()
     | "--role" :: r :: rest -> roles := !roles @ [ r ]; go rest
@@ -60,6 +61,7 @@ let () =
     | "--certify" :: r :: rest -> cert := Some r; go rest
     | "--tick-ns" :: n :: rest -> tick_ns := int_of_string n; go rest
     | "--issue" :: n :: rest -> issue := Some (int_of_string n); go rest
+    | "--emit-image" :: f :: rest -> image := Some f; go rest
     | "--io" :: spec :: rest ->
         (match List.map int_of_string (String.split_on_char ',' spec) with
          | [ sync; out; skew; jitter ] -> io := { sync; out; skew; jitter }
@@ -85,6 +87,15 @@ let () =
   in
   List.iter check_role !roles;
   let did = ref false in
+  (match !image with
+   | None -> ()
+   | Some f ->
+       let oc = open_out_bin f in
+       output_string oc (Hw.image_py ~source:(Filename.basename path) prog);
+       close_out oc;
+       Printf.printf "wrote %s (%d words)
+" f (Array.length (Hw.compile prog).Hw.words);
+       did := true);
   if !roles <> [] then begin
     print_machine ("role " ^ String.concat "+" !roles) (specialize prog (Run_as !roles));
     did := true
