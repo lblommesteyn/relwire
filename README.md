@@ -148,14 +148,26 @@ What the physical flow taught the architecture:
   registers. Each core now has its own read ports, and its own instruction
   register.
 * At 50 MHz the slow corner (1.08 V, 125 C) missed setup by 4.5 ns while the
-  typical and fast corners met it. The target is now 40 MHz.
+  typical and fast corners met it, and dropping to 40 MHz alone did not close it:
+  the paths were too deep (about 15 levels of weak gates on long wires, with each
+  core's flip-flops spread over a few hundred micrometres). A **predecode stage**
+  closed it: everything the execute cycle tests is stable for a whole tick, so it
+  is computed one cycle earlier into registers.
+* The gate-level test caught registers with no reset that RTL simulation hides;
+  every state register now resets.
 
-An earlier revision hardened clean and passed Tiny Tapeout's precheck (DRC 0,
-LVS 0, antenna 0, 64% utilization, 50 MHz met at the slow corner before the
-reset and timing changes). The current revision's 40 MHz results come from
-[tt-relwire's CI](https://github.com/lblommesteyn/tt-relwire/actions). About 240
-max-slew and a few max-cap warnings at the slow corner remain open, driven by
-the flip-flop program memory.
+Current result (CI on [tt-relwire](https://github.com/lblommesteyn/tt-relwire/actions)):
+
+| | |
+|---|---|
+| Tiny Tapeout precheck | passed |
+| gate-level cocotb test | passed |
+| DRC (router, Magic) / LVS | 0 / 0 |
+| setup, slow corner 1.08 V / 125 C, 40 MHz | met, +5.58 ns |
+| setup, typical corner | met, +11.06 ns |
+| hold, fast corner | met, +0.11 ns |
+| utilization | 67% of 1289 x 711 um |
+| open warnings | 170 max-slew, 24 max-cap (slow corner) |
 
 ## Open questions
 
@@ -163,4 +175,4 @@ the flip-flop program memory.
   in-frame resynchronization.
 * The consistency claim is argued and fuzzed, not mechanized.
 * The program memory, as flip-flops, dominates area, hold buffering and the
-  slew warnings; a smaller or latch-based memory is the path back to 50 MHz.
+  remaining slew warnings.
