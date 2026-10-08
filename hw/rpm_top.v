@@ -86,6 +86,8 @@ module tt_um_relwire #(
       cnt <= 0;
       run <= 0;
       rb_mode <= 0;
+      rb_core <= 0;
+      rb_byte <= 0;
       for (i = 0; i < NC; i = i + 1) masks[i] <= 0;
       for (i = 0; i < NW; i = i + 1) wres[i] <= 0;
     end else if (frm_s[1]) cnt <= 0;
@@ -219,9 +221,11 @@ module tt_um_relwire #(
   integer ig;
   always @(posedge clk)
     for (ig = 0; ig < NC; ig = ig + 1)
-      if (parking && park_core == ig) ireg[ig] <= instr;
+      if (cores_rst) ireg[ig] <= 0;
+      else if (parking && park_core == ig) ireg[ig] <= instr;
   always @(posedge clk) begin
     if (sram_we) prog_mem[sram_waddr[6:0]] <= sram_wdata;
+    else if (cores_rst) dout <= 0;
     else if (fetching) dout <= prog_mem[pc[fetch_core][6:0]];
   end
 

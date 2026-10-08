@@ -105,8 +105,14 @@ module rpm_core #(
   reg [6:0] p_addr;
   reg p_bus, p_rose, p_dbit, p_ge_a, p_dl, p_run, p_last, p_tne;
   reg [1:0] p_rw;
+  // Reset too, although every value is written before it is used: a gate-level
+  // netlist must not start from X (RTL simulation would hide it).
   always @(posedge clk)
-    if (pre_en) begin
+    if (rst) begin
+      p_addr <= 0;
+      {p_bus, p_rose, p_dbit, p_ge_a, p_dl, p_run, p_last, p_tne} <= 0;
+      p_rw <= 0;
+    end else if (pre_en) begin
       p_addr <= addr;
       p_bus <= bus;
       p_rose <= rose;
@@ -195,6 +201,11 @@ module rpm_core #(
       last <= 0;
       lactive <= 0;
       idx <= 0;
+      lstart <= 0;
+      lend <= 0;
+      lcount <= 0;
+      ev_code <= 0;
+      ev_addr <= 0;
       for (i = 0; i < NW; i = i + 1) run_len[i] <= 0;
     end else if (exec_en && !halted) begin
       case (op)
