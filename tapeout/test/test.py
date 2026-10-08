@@ -39,7 +39,7 @@ async def send(dut, byte):
 @cocotb.test()
 async def test_i2c_three_roles_one_binary(dut):
     stream, ticks, expected = read_vectors()
-    cocotb.start_soon(Clock(dut.clk, 25, unit="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     dut.ena.value = 1
     dut.ui_in.value = 0
     dut.load_strobe.value = 0
