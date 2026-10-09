@@ -40,22 +40,27 @@ $ relwirec examples/i2c.rw                       # summary: wires, roles, sizes
 $ relwirec examples/i2c.rw --role controller     # what the controller executes
 $ relwirec examples/i2c.rw --role target
 $ relwirec examples/i2c.rw --observe             # passive analyzer / checker
-$ relwirec examples/i2c_ns.rw --tick-ns 250 --certify controller --issue 1
-i2c_ns.rw, role controller, 275 ns/tick, io sync=0 out=0 skew=0 jitter=0, issue 1
+$ relwirec examples/i2c_ns.rw --tick-ns 220 --certify controller --issue 1
+i2c_ns.rw, role controller, 220 ns/tick, io sync=0 out=0 skew=0 jitter=0, issue 1
   constraint       spec             guaranteed     margin
-  tHD;STA        600ns           1100ns             +500ns  PASS (1)
-  tLOW          1300ns           1650ns..inf        +350ns  PASS (19)
+  tHD;STA        600ns            880ns             +280ns  PASS (1)
+  tLOW          1300ns           1540ns..inf        +240ns  PASS (19)
   tHIGH          600ns           1100ns             +500ns  PASS (18)
-  tSU;DAT        100ns            825ns..inf        +725ns  PASS assumes peer (19)
-  tHD;DAT          0ns            550ns..825        +550ns  PASS assumes peer (19)
-  tSU;STO        600ns           1100ns..inf        +500ns  PASS (1)
+  tSU;DAT        100ns            880ns..inf        +780ns  PASS assumes peer (19)
+  tHD;DAT          0ns            440ns..660        +440ns  PASS assumes peer (19)
+  tSU;STO        600ns            880ns..inf        +280ns  PASS (1)
+  fSCL          2500ns           2640ns..inf        +140ns  PASS (18)
   PASS
 ```
 
 The last command proves that the chip, running this program at its real
-timing (40 MHz, one instruction per 250 ns tick), meets the I2C Fast-mode spec
-on every path, including the cost of its own instructions. Times in the source
-are physical (`1300ns`); `--tick-ns` compiles them for a clock.
+timing (50 MHz, one instruction per 220 ns tick), meets the I2C Fast-mode spec
+on every path, including the cost of its own instructions, at about 379 kHz.
+It also caught a real mistake: at 50 MHz, driving only the minimum SCL high
+time would have run the bus at 413 kHz, over Fast-mode's 400 kHz limit, which
+the spec file had not stated; with the `fSCL` constraint added, the certificate
+rejects that. Times in the source are physical (`1300ns`); `--tick-ns`
+compiles them for a clock.
 
 Build with `dune build` (OCaml 4.14, dune 3); `dune test` runs everything below.
 
@@ -117,8 +122,10 @@ Tapeout top `tt_um_relwire`.
   speed is data, not code.
 * 4 cores, a 128 x 26 flip-flop program memory with time-multiplexed fetch, a
   2-flop synchronizer on the protocol pins, a byte-wide loader and readback.
-* **Single issue**: one instruction per core per tick, a tick being 10 cycles
-  (250 ns at 40 MHz). Every instruction, including loop setup and the final
+* **Single issue**: one instruction per core per tick, a tick being 11 cycles
+  (220 ns at 50 MHz). Each instruction is fetched, parked in the core's own
+  register, predecoded into registers, then executed, so the execute cycle is a
+  short next-state mux. Every instruction, including loop setup and the final
   halt, costs a tick; the timing certificate charges for it and checks
   reaction hazards (a core must reach a wait before its edge can occur).
 
@@ -155,6 +162,9 @@ What the physical flow taught the architecture:
   is computed one cycle earlier into registers.
 * The gate-level test caught registers with no reset that RTL simulation hides;
   every state register now resets.
+* With timing healthy, placement-stage repair margins (aim 30% inside the
+  slew/cap limits, buffer long wires) cut the slew warnings by a third and the
+  cap warnings almost entirely, and 50 MHz closes.
 
 Current result (CI on [tt-relwire](https://github.com/lblommesteyn/tt-relwire/actions)):
 
@@ -163,11 +173,11 @@ Current result (CI on [tt-relwire](https://github.com/lblommesteyn/tt-relwire/ac
 | Tiny Tapeout precheck | passed |
 | gate-level cocotb test | passed |
 | DRC (router, Magic) / LVS | 0 / 0 |
-| setup, slow corner 1.08 V / 125 C, 40 MHz | met, +5.58 ns |
-| setup, typical corner | met, +11.06 ns |
+| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +3.14 ns |
+| setup, typical corner | met, +8.01 ns |
 | hold, fast corner | met, +0.11 ns |
-| utilization | 67% of 1289 x 711 um |
-| open warnings | 170 max-slew, 24 max-cap (slow corner) |
+| utilization | 68% of 1289 x 711 um |
+| open warnings | 115 max-slew, 3 max-cap (slow corner) |
 
 ## Open questions
 

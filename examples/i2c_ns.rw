@@ -5,6 +5,8 @@
 const t_hd_sta = 600ns
 const t_low    = 1300ns
 const t_high   = 600ns
+const t_high_tx = 800ns   # what we drive: keeps fSCL <= 400 kHz on coarse ticks
+const t_period = 2500ns  # 1 / 400 kHz
 const t_su_dat = 100ns
 const t_su_sto = 600ns
 
@@ -23,7 +25,7 @@ macro bit_cell(f, i) {
   put    SDA f[i]
   edge   SCL -> 1 @scl_rise in [t_low, inf]
   sample SDA f[i]
-  edge   SCL -> 0 @scl_fall in [t_high, inf]
+  edge   SCL -> 0 @scl_fall in [t_high_tx, inf]
 }
 
 protocol {
@@ -46,3 +48,4 @@ constraint "tHIGH":   scl_rise   -> scl_fall >= t_high
 constraint "tSU;DAT": change SDA -> scl_rise >= t_su_dat
 constraint "tHD;DAT": scl_fall   -> change SDA >= 0ns
 constraint "tSU;STO": scl_rise   -> stop >= t_su_sto
+constraint "fSCL":    scl_rise   -> scl_rise >= t_period

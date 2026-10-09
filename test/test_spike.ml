@@ -482,14 +482,27 @@ let () =
 
   print_endline "19. physical units: one source, any tick length";
   let n20 = Rw_parse.program_of_file ~tick_ns:20 "../examples/i2c_ns.rw" in
-  check "i2c_ns.rw at 20 ns compiles to the same program as i2c.rw"
-    ({ n20 with constraints = [] } = { wt with constraints = [] }
-     && List.map (fun c -> c.min_ticks) n20.constraints = List.map (fun c -> c.min_ticks) wt.constraints);
-  let n180 = Rw_parse.program_of_file ~tick_ns:250 "../examples/i2c_ns.rw" in
+  let mt p n = (List.find (fun c -> c.cname = n) p.constraints).min_ticks in
+  check "i2c_ns.rw at 20 ns: every spec rounds to the same ticks as i2c.rw"
+    (List.for_all (fun c -> mt n20 c.cname = c.min_ticks) wt.constraints);
+  check "i2c_ns.rw at 20 ns: same shape as i2c.rw (statement for statement)"
+    (Array.length (specialize n20 (Run_as [ "controller" ]))
+     = Array.length (specialize wt (Run_as [ "controller" ])));
+  let n180 = Rw_parse.program_of_file ~tick_ns:220 "../examples/i2c_ns.rw" in
   let c180 = certify ~issue:1 n180 (Run_as [ "controller" ]) in
-  print_certificate ~tick_ns:250 "  i2c_ns.rw on the chip: 250 ns tick (40 MHz), single issue" c180;
-  check "Fast-mode spec holds at the chip's tick, in real nanoseconds"
-    (List.for_all (fun l -> l.pass && l.guaranteed.lo * 250 >= Option.get l.constr.spec_ns) c180);
+  print_certificate ~tick_ns:220 "  i2c_ns.rw on the chip: 220 ns tick (50 MHz), single issue" c180;
+  check "Fast-mode spec, including fSCL <= 400 kHz, holds at the chip's tick, in real nanoseconds"
+    (List.for_all (fun l -> l.pass && l.guaranteed.lo * 220 >= Option.get l.constr.spec_ns) c180);
+  let tight = Rw_parse.program_of_string ~tick_ns:220
+      (String.concat "
+"
+         (List.map (fun l -> if String.length l > 14 && String.sub l 0 14 = "const t_high_t" then "const t_high_tx = 600ns" else l)
+            (String.split_on_char '
+'
+               (let ic = open_in_bin "../examples/i2c_ns.rw" in
+                let s = really_input_string ic (in_channel_length ic) in close_in ic; s)))) in
+  check "and driving only the 600 ns minimum high time would be too fast: the certificate catches it"
+    (not (List.find (fun l -> l.constr.cname = "fSCL") (certify ~issue:1 tight (Run_as [ "controller" ]))).pass);
   check "and no reaction hazards on the chip" (reaction_hazards n180 (Run_as [ "controller" ]) = []
                                                 && reaction_hazards n180 (Run_as [ "target" ]) = []);
 
