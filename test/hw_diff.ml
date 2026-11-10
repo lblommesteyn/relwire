@@ -143,6 +143,17 @@ let () =
       (Run_as [ "tx" ], [ ("id", "00000101111"); ("dlc", "0001"); ("data", "11110000"); ("crc", crc) ]);
       (Run_as [ "rx" ], [ ("ack", "0") ]);
       (Observe_all, []) ];
+  (* the checksum computed on the chip: no core is given the CRC *)
+  let canc = Rw_parse.program_of_file "../examples/can_crc.rw" in
+  scenario "can_crc" canc ~ticks:8000
+    [ (Run_as [ "tx" ], [ ("id", "00000111111"); ("dlc", "0001"); ("data", "11111111") ]);
+      (Run_as [ "rx" ], [ ("ack", "0") ]);
+      (Observe_all, []) ];
+  scenario "can_crc_arbitration" canc ~ticks:8000
+    [ (Run_as [ "tx" ], [ ("id", "00000111111"); ("dlc", "0001"); ("data", "10101010") ]);
+      (Run_as [ "tx" ], [ ("id", "00000101111"); ("dlc", "0001"); ("data", "11110000") ]);
+      (Run_as [ "rx" ], [ ("ack", "0") ]);
+      (Observe_all, []) ];
   (* Random programs (the projection fuzzer's generator) through the RTL:
      every role as a core plus an observer, single issue, compiled to one
      shared binary; with and without a second controller in arbitration. *)

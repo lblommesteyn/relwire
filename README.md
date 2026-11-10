@@ -82,15 +82,25 @@ register. See [docs/semantics.md](docs/semantics.md).
 | `edge W -> L @t in [a, b]` | drive W to L, `a` after the anchor | wait for the transition, check its window |
 | `put W f[i]` / `put_not W f[i]` | drive the bit (or its complement) | release W |
 | `sample W f[i]` | check the wire: a mismatch is lost arbitration | bind the bit (literals: check) |
+| `sample W f[i] into c` | the same, and fold the sampled level into checksum `c` | same |
+| `put W c[i]`, `sample W c[i]` for a `crc c[n] poly P` | drive the checksum register's top bit | check the wire against their own register |
 | `toggle W f[i] @t at n in [a, b]` | edge whose new level is the bit | accept a transition in the window, bind, re-anchor |
 | `after t n` | timer mark `n` after the anchor | same |
 | `if f[i] == v { }`, `if_run W n { }` | branch on bits everyone has sampled | same branch |
 | `repeat i n { }`, `use macro(args)` | | |
 
+A `crc` is a field nobody supplies. Every role folds the same sampled wire
+levels into its own shift register, so every role holds the same value, by the
+same argument that lets a branch test wire history. The owner sends it and the
+rest check it. One instruction per 220 ns tick leaves a CAN bit about four
+instructions at 1 Mbit/s, far too few to compute a CRC-15 in the program, so
+the fold is part of `sample` and costs no instructions.
+
 Wires declare a resolution (`push_pull`, `dominant_low`, `dominant_high`) and a
 bias (`pull_up`, `pull_down`, `floating`). Examples: I2C (write, read-or-write on
 the R/W bit), SPI (full duplex), UART, Manchester, CAN (bit stuffing as a branch
-on shared wire history, arbitration, stuff errors).
+on shared wire history, arbitration, stuff errors; `can_crc.rw` computes the
+CRC-15 on the chip).
 
 ## How it is checked
 
@@ -99,6 +109,7 @@ on shared wire history, arbitration, stuff errors).
 | semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation |
 | projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier; 2,400 runs at 300 seeds |
 | RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 8 protocol scenarios plus random programs, through the pin-level top and its loader |
+| symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. One swap and one 4-cycle generate S4, so six runs cover all of S4 x S4 x S4 (13,824 relabellings), on RTL and on the gate-level netlist |
 | netlist vs RTL | `hw/gl/`: the routed netlist, cycle for cycle on every output pin |
 | in CI | [tt-relwire](https://github.com/lblommesteyn/tt-relwire): Tiny Tapeout's GDS build, precheck, and cocotb tests on RTL and gate level |
 
@@ -120,6 +131,9 @@ Tapeout top `tt_um_relwire`.
   each core has a 4-bit role mask.
 * Timing values live in an 8-entry table shared by the cores, so a program's
   speed is data, not code.
+* A 16-bit checksum register per core steps as an LFSR on a folding sample.
+  The polynomial is data too (table entry 7, left-aligned), so one register
+  serves CRC-5, CRC-15 and CRC-16.
 * 4 cores, a 128 x 26 flip-flop program memory with time-multiplexed fetch, a
   2-flop synchronizer on the protocol pins, a byte-wide loader and readback.
 * **Single issue**: one instruction per core per tick, a tick being 11 cycles
@@ -140,10 +154,12 @@ per core, runs the chip and decodes what each core saw. Its loader stream is
 byte-identical to the one the RTL and gate-level tests run. It has not run on a
 board: there is no silicon yet.
 
-## Physical design (Tiny Tapeout, IHP CMOS5L, 6x4 tiles)
+## Physical design (Tiny Tapeout, IHP CMOS5L, 8x4 tiles)
 
 `tapeout/` holds the Tiny Tapeout project; `export_tt_repo.sh` generates the
-submission repository, and `setup_local.sh`/`harden.sh` mirror its CI locally.
+submission repository. CI builds with the March 2027 shuttle's action tag,
+`ttihp27a` (LibreLane 3.1.0.dev4). `setup_local.sh`/`harden.sh` mirror the
+earlier `ihp-cmos5l` action and have not been moved to the new pins.
 
 What the physical flow taught the architecture:
 
@@ -165,24 +181,43 @@ What the physical flow taught the architecture:
 * With timing healthy, placement-stage repair margins (aim 30% inside the
   slew/cap limits, buffer long wires) cut the slew warnings by a third and the
   cap warnings almost entirely, and 50 MHz closes.
+* Moving to the shuttle's toolchain grew the netlist by 10%: the cell library
+  has no flop without a reset pin, the resets were synchronous, and the new
+  flow ties each unused pin high with its own tie cell (4,526 of them). At 6x4
+  that put the floorplan at 60% and placement failed after hold repair. The
+  design moved to 8x4, the confirmed maximum.
+* On the new netlist the gate-level test read X. Synthesis had folded the
+  synchronous clear of one loop-index bit into `X | ~X`: always 0 in silicon,
+  but X in simulation when the flop starts unknown, and the bit never left X.
+  A three-valued replay of the netlist traced it to that bit; forcing the one
+  bit to 0 made the test pass. The fix is structural, not a nudge to
+  synthesis: `rst_n` goes through a two-flop synchronizer (asynchronous
+  assert, synchronous release) to the flops' reset pins, so every state
+  register is known in reset however the logic is built. The run/stop clear
+  stays synchronous. Only the program memory and the constant table, which the
+  loader writes, are not reset.
 
 Current result (CI on [tt-relwire](https://github.com/lblommesteyn/tt-relwire/actions)):
 
 | | |
 |---|---|
 | Tiny Tapeout precheck | passed |
-| gate-level cocotb test | passed |
+| gate-level cocotb tests (7, six of them symmetry) | passed |
 | DRC (router, Magic) / LVS | 0 / 0 |
-| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +3.14 ns |
-| setup, typical corner | met, +8.01 ns |
+| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +9.57 ns |
+| setup, typical corner | met, +11.87 ns |
 | hold, fast corner | met, +0.11 ns |
-| utilization | 68% of 1289 x 711 um |
-| open warnings | 115 max-slew, 3 max-cap (slow corner) |
+| utilization | 53% of 1724 x 711 um |
+| max-slew / max-cap violations | 0 / 0 in every corner |
 
 ## Open questions
 
 * CAN is modelled with hard synchronization on start of frame only, not
   in-frame resynchronization.
 * The consistency claim is argued and fuzzed, not mechanized.
-* The program memory, as flip-flops, dominates area, hold buffering and the
-  remaining slew warnings.
+* The program memory, as flip-flops, dominates area and hold buffering.
+* The checksum is tested with CRC-15 only. The register starts at zero and is
+  sent uninverted, so CRCs that start at all ones or are sent inverted (USB)
+  are not expressible yet.
+* The gate-level tests run an I2C program; the checksum is checked against the
+  reference model at RTL, not on the netlist.

@@ -57,6 +57,13 @@ type decl =
   (* A checked bit whose value a branch computes from wire history
      (e.g. a stuff bit = complement of the last bit on the wire). *)
   | Derived of { name : string; owner : role }
+  (* A checksum: [width] bits that nobody supplies as input. Every agent keeps
+     a shift register (an LFSR for the polynomial [poly], given without its
+     x^width term) and folds into it the wire levels of the samples marked
+     [Sample_into]. The owner drives the register's top bit; everyone else
+     checks the wire against their own. They agree because they folded the
+     same wire history, which is why this needs no new projection rule. *)
+  | Crc of { name : string; width : int; poly : int; owner : role }
 
 (* Constraint endpoints: an edge (by time variable) or a Put onto a wire. *)
 type event_ref = At of string | Change of string
@@ -79,6 +86,8 @@ type stmt =
   (* Field bit is carried on the wire from now until the matching Sample. *)
   | Put of { wire : string; field : string; idx : index }
   | Sample of { wire : string; field : string; idx : index }
+  (* A sample whose wire level is also folded into the checksum [crc]. *)
+  | Sample_into of { wire : string; field : string; idx : index; crc : string }
   | Repeat of { var : string; count : int; body : stmt list }
   (* A time point fixed by the agreed rate, not by any wire: [ticks] after
      the previous anchor. Every agent places it with its own timer. *)
@@ -112,7 +121,8 @@ type instr =
   | IEdge of { wire : string; level : level; time : string; role : role;
                own : own; min_after : int; max_after : int }
   | IPut of { wire : string; field : string; bit : int; role : role; own : own; inv : bool }
-  | ISample of { wire : string; field : string; bit : int; role : role; own : own }
+  | ISample of { wire : string; field : string; bit : int; role : role; own : own;
+                 fold : bool }  (* fold the sampled level into the checksum *)
   | IAfter of { time : string; ticks : int }
   | IToggle of { wire : string; field : string; bit : int; time : string; role : role;
                  own : own; nominal : int; min_after : int; max_after : int }
@@ -129,14 +139,20 @@ let owner_of prog name =
   List.find_map
     (function
       | Field { name = n; owner; _ } | Time { name = n; owner } | Lit { name = n; owner; _ }
-      | Derived { name = n; owner } ->
+      | Derived { name = n; owner } | Crc { name = n; owner; _ } ->
           if n = name then Some owner else None)
     prog.decls
   |> function
   | Some r -> r
   | None -> failwith ("undeclared variable " ^ name)
 
+let crc_of prog =
+  List.find_map
+    (function Crc { name; width; poly; _ } -> Some (name, width, poly) | _ -> None)
+    prog.decls
+
 let specialize prog assignment =
+  let is_crc f = match crc_of prog with Some (n, _, _) -> n = f | None -> false in
   let own_of role =
     match assignment with
     | Observe_all -> Observed
@@ -175,7 +191,16 @@ let specialize prog assignment =
     | Sample { wire; field; idx } ->
         let role = owner_of prog field in
         let bit = ix env idx in
-        ([ ISample { wire; field; bit; role; own = own_of role } ], (field, bit) :: sampled)
+        (* the checksum's own bits are folded too: what is sent is the top
+           bit, so folding it shifts the register *)
+        ( [ ISample { wire; field; bit; role; own = own_of role; fold = is_crc field } ],
+          (field, bit) :: sampled )
+    | Sample_into { wire; field; idx; crc } ->
+        if not (is_crc crc) then failwith (crc ^ " is not a declared crc");
+        let role = owner_of prog field in
+        let bit = ix env idx in
+        ( [ ISample { wire; field; bit; role; own = own_of role; fold = true } ],
+          (field, bit) :: sampled )
     | After { time; ticks } -> ([ IAfter { time; ticks } ], sampled)
     | Repeat { var; count; body } ->
         let outer = not !looped in
@@ -241,7 +266,24 @@ type agent = {
   in_sync : int;  (* ticks from bus to what this agent sees *)
   out_delay : int;  (* extra ticks from this agent's drive to the bus *)
   issue : int option;  (* instructions completed per tick; None = run until blocked *)
+  crc_def : (string * int * int) option;  (* checksum field, width, polynomial *)
+  mutable crc : int;  (* the checksum register *)
 }
+
+let crc_msb a =
+  match a.crc_def with
+  | Some (_, w, _) -> if (a.crc lsr (w - 1)) land 1 = 1 then L1 else L0
+  | None -> L0
+
+let crc_fold a lv =
+  match a.crc_def with
+  | Some (_, w, poly) ->
+      let fb = (crc_msb a = L1) <> (lv = L1) in
+      let r = (a.crc lsl 1) land ((1 lsl w) - 1) in
+      a.crc <- (if fb then r lxor poly else r)
+  | None -> ()
+
+let is_crc_field a f = match a.crc_def with Some (n, _, _) -> n = f | None -> false
 
 let make_agent ?(clock = 1.0) ?(in_sync = 0) ?(out_delay = 0) ?issue ~name prog assignment ~inputs =
   let env = Hashtbl.create 8 in
@@ -255,13 +297,14 @@ let make_agent ?(clock = 1.0) ?(in_sync = 0) ?(out_delay = 0) ?issue ~name prog 
           Hashtbl.replace env name a
       | Lit { name; value; _ } -> Hashtbl.replace env name [| Some value |]
       | Derived { name; _ } -> Hashtbl.replace env name [| None |]
+      | Crc { name; width; _ } -> Hashtbl.replace env name (Array.make width None)
       | Time _ -> ())
     prog.decls;
   { aname = name; machine = specialize prog assignment;
     specs = List.map (fun w -> (w.name, w)) prog.wires;
     pc = 0; phase = Ready; anchor = 0; demoted = [];
     drives = Hashtbl.create 4; env; hist = Hashtbl.create 4; events = [];
-    clock; in_sync; out_delay; issue;
+    clock; in_sync; out_delay; issue; crc_def = crc_of prog; crc = 0;
     lits =
       List.filter_map
         (function Lit { name; _ } | Derived { name; _ } -> Some (name, ()) | _ -> None)
@@ -287,7 +330,9 @@ let step a ~tick ~now ~prev =
          let d =
            match effective a role own with
            | Supplied -> (
-               match (Hashtbl.find a.env field).(bit) with
+               match
+                 if is_crc_field a field then Some (crc_msb a) else (Hashtbl.find a.env field).(bit)
+               with
                | Some lv ->
                    let lv = if inv then (if lv = L0 then L1 else L0) else lv in
                    drive_for (List.assoc wire a.specs) lv
@@ -296,8 +341,9 @@ let step a ~tick ~now ~prev =
          in
          Hashtbl.replace a.drives wire d;
          a.pc <- a.pc + 1
-     | ISample { wire; field; bit; role; own } ->
+     | ISample { wire; field; bit; role; own; fold } ->
          let cell = Hashtbl.find a.env field in
+         let crcf = is_crc_field a field in
          (match now wire with
           | V lv ->
               Hashtbl.replace a.hist wire
@@ -305,18 +351,23 @@ let step a ~tick ~now ~prev =
           | _ -> ());
          (match (now wire, effective a role own) with
           | V lv, Supplied ->
-              if cell.(bit) = Some lv then log a tick Match field bit
+              let mine = if crcf then Some (crc_msb a) else cell.(bit) in
+              if mine = Some lv then log a tick Match field bit
               else begin
                 cell.(bit) <- Some lv;
                 log a tick Arbitration_lost field bit;
                 a.demoted <- role :: a.demoted;
                 release_all a
               end
+          | V lv, Observed when crcf ->
+              (* a received checksum bit is checked against the local register *)
+              if crc_msb a <> lv then log a tick Mismatch field bit else cell.(bit) <- Some lv
           | V lv, Observed -> (
               match (List.mem_assoc field a.lits, cell.(bit)) with
               | true, Some expect when expect <> lv -> log a tick Mismatch field bit
               | _ -> cell.(bit) <- Some lv)
           | (Float | Contention), _ -> log a tick Bad_wire field bit);
+         (if fold then match now wire with V lv -> crc_fold a lv | _ -> ());
          a.pc <- a.pc + 1
      | IBranch { cond; skip } ->
          let taken =
