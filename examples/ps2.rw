@@ -1,0 +1,43 @@
+# PS/2, device to host: start bit, 8 data bits, odd parity, stop bit. The
+# device owns the clock and the data; the host only listens. Data changes
+# while the clock is high and is sampled on its falling edge.
+#
+# Nobody is given the parity. Parity is a checksum of degree 1 (x + 1), so it
+# uses the same register as CAN's CRC-15: every role folds the data bits it
+# samples, the device sends the register and the host checks the wire against
+# its own. Folding the idle line (a 1) first makes it odd parity.
+
+const half = 40us   # 12.5 kHz clock
+
+wire CLK  dominant_low pull_up
+wire DATA dominant_low pull_up
+
+field data[8]   from device
+crc   par[1] poly 1 from device   # x + 1: a running XOR
+lit   idle  = 1 from device
+lit   start = 0 from device
+lit   stop  = 1 from device
+time  fall, rise from device
+
+macro cell(f, i) {
+  put    DATA f[i]
+  edge   CLK -> 0 @fall in [half, inf]
+  sample DATA f[i]
+  edge   CLK -> 1 @rise in [half, inf]
+}
+
+protocol {
+  sample DATA idle[0] into par   # the line is idle; start the parity at 1
+  use cell(start, 0)
+  repeat i 8 {
+    put    DATA data[i]
+    edge   CLK -> 0 @fall in [half, inf]
+    sample DATA data[i] into par
+    edge   CLK -> 1 @rise in [half, inf]
+  }
+  use cell(par, 0)
+  use cell(stop, 0)
+}
+
+constraint "tCKL": fall -> rise >= half
+constraint "tCKH": rise -> fall >= half
