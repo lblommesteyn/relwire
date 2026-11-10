@@ -82,15 +82,25 @@ register. See [docs/semantics.md](docs/semantics.md).
 | `edge W -> L @t in [a, b]` | drive W to L, `a` after the anchor | wait for the transition, check its window |
 | `put W f[i]` / `put_not W f[i]` | drive the bit (or its complement) | release W |
 | `sample W f[i]` | check the wire: a mismatch is lost arbitration | bind the bit (literals: check) |
+| `sample W f[i] into c` | the same, and fold the sampled level into checksum `c` | same |
+| `put W c[i]`, `sample W c[i]` for a `crc c[n] poly P` | drive the checksum register's top bit | check the wire against their own register |
 | `toggle W f[i] @t at n in [a, b]` | edge whose new level is the bit | accept a transition in the window, bind, re-anchor |
 | `after t n` | timer mark `n` after the anchor | same |
 | `if f[i] == v { }`, `if_run W n { }` | branch on bits everyone has sampled | same branch |
 | `repeat i n { }`, `use macro(args)` | | |
 
+A `crc` is a field nobody supplies. Every role folds the same sampled wire
+levels into its own shift register, so every role holds the same value, by the
+same argument that lets a branch test wire history. The owner sends it and the
+rest check it. One instruction per 220 ns tick leaves a CAN bit about four
+instructions at 1 Mbit/s, far too few to compute a CRC-15 in the program, so
+the fold is part of `sample` and costs no instructions.
+
 Wires declare a resolution (`push_pull`, `dominant_low`, `dominant_high`) and a
 bias (`pull_up`, `pull_down`, `floating`). Examples: I2C (write, read-or-write on
 the R/W bit), SPI (full duplex), UART, Manchester, CAN (bit stuffing as a branch
-on shared wire history, arbitration, stuff errors).
+on shared wire history, arbitration, stuff errors; `can_crc.rw` computes the
+CRC-15 on the chip).
 
 ## How it is checked
 
@@ -99,6 +109,7 @@ on shared wire history, arbitration, stuff errors).
 | semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation |
 | projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier; 2,400 runs at 300 seeds |
 | RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 8 protocol scenarios plus random programs, through the pin-level top and its loader |
+| symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. One swap and one 4-cycle generate S4, so six runs cover all of S4 x S4 x S4 (13,824 relabellings), on RTL and on the gate-level netlist |
 | netlist vs RTL | `hw/gl/`: the routed netlist, cycle for cycle on every output pin |
 | in CI | [tt-relwire](https://github.com/lblommesteyn/tt-relwire): Tiny Tapeout's GDS build, precheck, and cocotb tests on RTL and gate level |
 
@@ -120,6 +131,9 @@ Tapeout top `tt_um_relwire`.
   each core has a 4-bit role mask.
 * Timing values live in an 8-entry table shared by the cores, so a program's
   speed is data, not code.
+* A 16-bit checksum register per core steps as an LFSR on a folding sample.
+  The polynomial is data too (table entry 7, left-aligned), so one register
+  serves CRC-5, CRC-15 and CRC-16.
 * 4 cores, a 128 x 26 flip-flop program memory with time-multiplexed fetch, a
   2-flop synchronizer on the protocol pins, a byte-wide loader and readback.
 * **Single issue**: one instruction per core per tick, a tick being 11 cycles
