@@ -18,8 +18,8 @@
 // Encoding (26 bits): [25:24] role, [23:20] op, [19] owned, [18:17] wire,
 // [16] lvl, [15:0]:
 //   1 EDGE        [15:13] min k, [12:10] max k
-//   2 PUT         [15] lit, [14] ix, [13:7] addr        (lvl = invert)
-//   3 SAMPLE      [15] lit, [14] ix, [13:7] addr
+//   2 PUT         [15] lit, [14] ix, [13:7] addr, [6] crc   (lvl = invert)
+//   3 SAMPLE      [15] lit, [14] ix, [13:7] addr, [6] fold, [5] crc
 //   4 AFTER       [15:13] k
 //   5 TOGGLE      [14] ix, [13:7] addr, [2:0] k: nominal K[k], min K[k+1], max K[k+2]
 //   6 BRANCH_RUN  [15:13] n, [12] set, [11:5] addr, [4:0] skip
@@ -28,6 +28,15 @@
 //   9 LOOP        [15:8] count, [7:0] offset of the body's last instruction
 //   0 HALT
 // A constant of 0xFFFF as a max means unbounded.
+//
+// Checksum: a 16-bit register steps as an LFSR, crc <- x*crc + bit*g(x) mod
+// g(x), on every SAMPLE with [fold] set. g is constant-table entry 7,
+// left-aligned (g(x) * x^(16-n) for degree n, without the x^n term), so the
+// remainder is always in the top n bits and one register serves any degree up
+// to 16. With [crc] set, PUT drives the register's top bit and SAMPLE compares
+// the wire with it instead of with data memory. Sending the top bit and
+// folding it back in shifts the register, so the same step transmits the
+// checksum and checks a received one.
 
 module rpm_core #(
     parameter NW = 4,
@@ -57,6 +66,7 @@ module rpm_core #(
     output wire [2:0] ksel_b,
     input wire [15:0] ka,
     input wire [15:0] kb,
+    input wire [15:0] kp,  // checksum polynomial: constant-table entry 7
     // byte write port into data memory (used by the loader while stopped)
     input wire ld_we,
     input wire [2:0] ld_byte,
@@ -74,6 +84,7 @@ module rpm_core #(
   reg lactive;
   reg [PCW-1:0] lstart, lend;
   reg [7:0] lcount, idx;
+  reg [15:0] crc;
 
   wire [3:0] op = instr[23:20];
   wire [1:0] role = instr[25:24];
@@ -95,7 +106,9 @@ module rpm_core #(
   wire [15:0] d = tick - anchor;
   wire bus = now[w];
   wire rose = now[w] != prev[w];
-  wire dbit = dmem[addr[5:0]];
+  // the data bit an instruction works with: data memory, or the checksum's top bit
+  wire csrc = (op == 4'd2 && instr[6]) || (op == 4'd3 && instr[5]);
+  wire dbit = csrc ? crc[15] : dmem[addr[5:0]];
   wire [1:0] rw = res[2*w+:2];
 
   // Predecode. Everything the execute cycle tests is stable for the whole
@@ -206,6 +219,7 @@ module rpm_core #(
       ev_code <= 0;
       ev_addr <= 0;
       run_len <= 0;
+      crc <= 0;
     end
   endtask
 
@@ -234,6 +248,7 @@ module rpm_core #(
               if (run_len[3*w+:3] != 3'd7) run_len[3*w+:3] <= run_len[3*w+:3] + 1'b1;
             end else run_len[3*w+:3] <= 3'd1;
             last[w] <= p_bus;
+          if (instr[6]) crc <= {crc[14:0], 1'b0} ^ ((crc[15] ^ p_bus) ? kp : 16'd0);
             if (sup) begin
               if (p_dbit == p_bus) emit(3'd1, p_addr);
               else lose;

@@ -27,6 +27,14 @@ let lex src =
       push (Id (String.sub src !i (!j - !i)));
       i := !j
     end
+    else if c = '0' && !i + 1 < n && src.[!i + 1] = 'x' then begin
+      let is_hex c = is_digit c || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') in
+      let j = ref (!i + 2) in
+      while !j < n && is_hex src.[!j] do incr j done;
+      if !j = !i + 2 then raise (Parse_error (!line, "empty hex literal"));
+      push (Int (int_of_string (String.sub src !i (!j - !i))));
+      i := !j
+    end
     else if is_digit c then begin
       let j = ref !i in
       while !j < n && (is_digit src.[!j] || src.[!j] = '_') do incr j done;
@@ -150,8 +158,10 @@ let level st =
 
 let declared_field st name =
   List.exists
-    (function Field { name = n; _ } | Lit { name = n; _ } | Derived { name = n; _ } -> n = name
-            | _ -> false)
+    (function
+      | Field { name = n; _ } | Lit { name = n; _ } | Derived { name = n; _ } | Crc { name = n; _ } ->
+          n = name
+      | _ -> false)
     st.decls
 
 let declared_time st name =
@@ -215,6 +225,9 @@ and stmt st scope =
       [ (match k with
          | "put" -> Put { wire; field; idx }
          | "put_not" -> Put_not { wire; field; idx }
+         | _ when peek st = Id "into" ->
+             ignore (next st);
+             Sample_into { wire; field; idx; crc = ident st }
          | _ -> Sample { wire; field; idx }) ]
   | Id "after" ->
       ignore (next st);
@@ -358,6 +371,17 @@ let top st =
       let name = ident st in
       kw st "from";
       st.decls <- st.decls @ [ Derived { name; owner = ident st } ]
+  | Id "crc" ->
+      (* crc NAME[width] poly P from ROLE: P without its x^width term *)
+      ignore (next st);
+      let name = ident st in
+      expect st "[";
+      let width = expr st in
+      expect st "]";
+      kw st "poly";
+      let poly = expr st in
+      kw st "from";
+      st.decls <- st.decls @ [ Crc { name; width; poly; owner = ident st } ]
   | Id "time" ->
       ignore (next st);
       let rec names acc =
@@ -424,5 +448,6 @@ let roles (prog : Relwire.program) =
   List.sort_uniq compare
     (List.map
        (function
-         | Field { owner; _ } | Time { owner; _ } | Lit { owner; _ } | Derived { owner; _ } -> owner)
+         | Field { owner; _ } | Time { owner; _ } | Lit { owner; _ } | Derived { owner; _ }
+         | Crc { owner; _ } -> owner)
        prog.decls)

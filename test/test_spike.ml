@@ -379,6 +379,47 @@ let () =
   check "a flipped stuff bit is reported as a stuff error (Mismatch on stuff)"
     (List.exists (fun e -> e.var = "stuff") (outcomes o3 Mismatch));
 
+  print_endline "15b. CAN with the CRC computed by every agent: nobody is given the checksum";
+  let canc = Rw_parse.program_of_file "../examples/can_crc.rw" in
+  let cc_tx name id data =
+    make_agent ~name canc (Run_as [ "tx" ])
+      ~inputs:[ ("id", bits id); ("dlc", bits "0001"); ("data", bits data) ]
+  in
+  let cc_rx name = make_agent ~name canc (Run_as [ "rx" ]) ~inputs:[ ("ack", bits "0") ] in
+  let t4 = cc_tx "TX" id1 d1 and r4 = cc_rx "RX" and o4 = observer_of canc "CO" in
+  let tr4 = simulate ~wires:canc.wires ~agents:[ t4; r4; o4 ] ~ticks:8000 () in
+  check "the wire carries the same frame as with a host-computed CRC, tick for tick" (tr4 = trc);
+  check "receiver and observer bind the CRC the reference computes"
+    (List.for_all (fun x -> field_value x "crc15" = crc_of id1 "0001" d1) [ r4; o4 ]);
+  check "no mismatches; all finished"
+    (List.for_all (fun x -> outcomes x Mismatch = [] && clean x && done_ x) [ t4; r4; o4 ]);
+  let tc = cc_tx "A" ida "10101010" and td = cc_tx "B" idb "11110000" in
+  let r5 = cc_rx "RX" and o5 = observer_of canc "CO" in
+  ignore (simulate ~wires:canc.wires ~agents:[ tc; td; r5; o5 ] ~ticks:8000 ());
+  check "the loser of arbitration checks the winner's CRC with its own register"
+    (field_value tc "crc15" = crc_of idb "0001" "11110000"
+     && (match outcomes tc Arbitration_lost with [ { var = "id"; bit = 6; _ } ] -> true | _ -> false)
+     && List.for_all (fun x -> outcomes x Mismatch = [] && done_ x) [ tc; td; r5; o5 ]);
+  (* corrupt one data bit of a frame whose stuffing the flip does not disturb *)
+  let id6 = "01010101010" and d6 = "01010101" in
+  let t6 = cc_tx "TX" id6 d6 and r6 = cc_rx "RX" in
+  let tr6 = simulate ~wires:canc.wires ~agents:[ t6; r6 ] ~ticks:8000 () in
+  let at = (List.find (fun e -> e.var = "data" && e.bit = 2) (List.rev t6.events)).tick in
+  let flip6 tr =
+    List.map
+      (fun (t, vs) ->
+        if t >= at - 74 && t < at + 26 then
+          (t, [ ("CAN", if List.assoc "CAN" vs = L0 then L1 else L0) ])
+        else (t, vs))
+      tr
+  in
+  let o6 = observer_of canc "CO" in
+  ignore (simulate ~wires:canc.wires ~agents:[ o6 ] ~raw:[ replay (flip6 tr6) canc.wires ] ~ticks:8000 ());
+  check "a corrupted data bit is caught by the CRC (Mismatch on crc15, none on stuff)"
+    (field_value o6 "data" = "01110101"
+     && List.exists (fun e -> e.var = "crc15") (outcomes o6 Mismatch)
+     && not (List.exists (fun e -> e.var = "stuff") (outcomes o6 Mismatch)));
+
   print_endline "16. branch lint and I2C read-or-write";
   let early =
     { (I2c.address_byte) with
