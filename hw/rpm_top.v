@@ -49,6 +49,19 @@ module tt_um_relwire #(
   localparam CAPTURE = LATCH + 1;  // first slot at which [now] holds it
   localparam CB = $clog2(NC);
 
+  // ---------------- reset ----------------
+  // Asynchronous assert, synchronous release. Every state register resets
+  // through its flop's reset pin, so it reaches a known value however
+  // synthesis structures the logic: a synchronous clear folded into the data
+  // path can leave a gate-level simulation stuck at X (X | ~X) even though
+  // the silicon would reset. The program memory and the constant table are
+  // not reset; the loader writes them.
+  reg [1:0] rst_sync;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) rst_sync <= 2'b00;
+    else rst_sync <= {rst_sync[0], 1'b1};
+  wire rst_ni = rst_sync[1];
+
   // ---------------- loader ----------------
   reg [2:0] stb_s;
   reg [1:0] frm_s;
@@ -61,8 +74,8 @@ module tt_um_relwire #(
   reg [3:0] cnt;
   reg [7:0] cmd, a0, a1, a2, a3, a4;
   reg run;
-  reg [3:0] masks[0:NC-1];
-  reg [1:0] wres[0:NW-1];
+  reg [4*NC-1:0] masks;  // 4 bits per core
+  reg [2*NW-1:0] wres;  // 2 bits per wire
   reg [15:0] kt[0:7];
   reg rb_mode;
   reg [CB-1:0] rb_core;
@@ -78,20 +91,35 @@ module tt_um_relwire #(
   reg [2:0] ld_byte;
   reg [7:0] ld_data;
 
-  integer i;
-  always @(posedge clk) begin
-    sram_we <= 1'b0;
-    ld_we <= 1'b0;
-    if (!rst_n) begin
+  always @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      sram_we <= 1'b0;
+      ld_we <= 1'b0;
       cnt <= 0;
       run <= 0;
       rb_mode <= 0;
       rb_core <= 0;
       rb_byte <= 0;
-      for (i = 0; i < NC; i = i + 1) masks[i] <= 0;
-      for (i = 0; i < NW; i = i + 1) wres[i] <= 0;
-    end else if (frm_s[1]) cnt <= 0;
-    else if (byte_in) begin
+      masks <= 0;
+      wres <= 0;
+      cmd <= 0;
+      a0 <= 0;
+      a1 <= 0;
+      a2 <= 0;
+      a3 <= 0;
+      a4 <= 0;
+      sram_waddr <= 0;
+      sram_wdata <= 0;
+      ld_core <= 0;
+      ld_byte <= 0;
+      ld_data <= 0;
+    end else if (frm_s[1]) begin
+      sram_we <= 1'b0;
+      ld_we <= 1'b0;
+      cnt <= 0;
+    end else if (byte_in) begin
+      sram_we <= 1'b0;
+      ld_we <= 1'b0;
       cnt <= cnt + 1'b1;
       case (cnt)
         0: cmd <= ui_in;
@@ -113,10 +141,7 @@ module tt_um_relwire #(
         sram_wdata <= {a1[1:0], a2, a3, ui_in};
         cnt <= 0;
       end
-      if (cnt == 3 && cmd == 8'h02) begin
-        kt[a0[2:0]] <= {a1, ui_in};
-        cnt <= 0;
-      end
+      if (cnt == 3 && cmd == 8'h02) cnt <= 0;  // the table write is below
       if (cnt == 3 && cmd == 8'h03) begin
         ld_we <= 1'b1;
         ld_core <= a0[CB-1:0];
@@ -125,11 +150,11 @@ module tt_um_relwire #(
         cnt <= 0;
       end
       if (cnt == 2 && cmd == 8'h04) begin
-        masks[a0[CB-1:0]] <= ui_in[3:0];
+        masks[4*a0[CB-1:0]+:4] <= ui_in[3:0];
         cnt <= 0;
       end
       if (cnt == 2 && cmd == 8'h05) begin
-        wres[a0[1:0]] <= ui_in[1:0];
+        wres[2*a0[1:0]+:2] <= ui_in[1:0];
         cnt <= 0;
       end
       if (cnt == 2 && cmd == 8'h08) begin
@@ -138,15 +163,23 @@ module tt_um_relwire #(
         rb_byte <= ui_in[2:0];
         cnt <= 0;
       end
+    end else begin
+      sram_we <= 1'b0;
+      ld_we <= 1'b0;
     end
   end
+
+  // The constant table has no reset, so it is written in its own block. In
+  // reset cnt is 0, so this cannot fire.
+  always @(posedge clk)
+    if (!frm_s[1] && byte_in && cnt == 3 && cmd == 8'h02) kt[a0[2:0]] <= {a1, ui_in};
 
   // ---------------- tick schedule ----------------
   reg [$clog2(T)-1:0] slot;
   reg [15:0] tick;
   reg [NW-1:0] now, prev;
   reg [NW-1:0] pin_oe, pin_out;
-  wire cores_rst = !rst_n || !run;
+  wire cores_rst = !run;  // synchronous stop; run is 0 in reset
   reg [NW-1:0] sync_r[0:SYNC-1];
   integer si;
   always @(posedge clk) begin
@@ -155,8 +188,13 @@ module tt_um_relwire #(
   end
   wire [NW-1:0] pins_in = sync_r[SYNC-1];
 
-  always @(posedge clk) begin
-    if (cores_rst) begin
+  always @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      slot <= 0;
+      tick <= 0;
+      prev <= 0;
+      now <= 0;
+    end else if (cores_rst) begin
       slot <= 0;
       tick <= 0;
     end else begin
@@ -188,8 +226,8 @@ module tt_um_relwire #(
   wire halted[0:NC-1];
   wire [63:0] dmem[0:NC-1];
   wire [25:0] instr;
-  reg [25:0] ireg[0:NC-1];  // per-core instruction registers
-  wire [2*NW-1:0] res = {wres[3], wres[2], wres[1], wres[0]};
+  reg [26*NC-1:0] ireg;  // per-core instruction registers, 26 bits each
+  wire [2*NW-1:0] res = wres;
   // Each core reads the shared table through its own two ports. A single
   // pair steered by the executing core is functionally fine but gives static
   // timing a die-wide path from one core's instruction into every other core.
@@ -201,10 +239,10 @@ module tt_um_relwire #(
       assign ka[g] = kt[ksa[g]];
       assign kb[g] = kt[ksb[g]];
       rpm_core #(.NW(NW)) u (
-          .clk(clk), .rst(cores_rst), .clr(!rst_n), .pre_en(predecoding && pre_core == g),
+          .clk(clk), .rst_n(rst_ni), .rst(cores_rst), .pre_en(predecoding && pre_core == g),
           .exec_en(executing && exec_core == g),
-          .tick(tick), .now(now), .prev(prev), .res(res), .instr(ireg[g]),
-          .role_mask(masks[g]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
+          .tick(tick), .now(now), .prev(prev), .res(res), .instr(ireg[26*g+:26]),
+          .role_mask(masks[4*g+:4]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
           .ev_valid(ev_valid[g]), .ev_code(ev_code[g]), .ev_addr(ev_addr[g]),
           .halted(halted[g]), .ksel_a(ksa[g]), .ksel_b(ksb[g]), .ka(ka[g]), .kb(kb[g]),
           .ld_we(ld_we && ld_core == g), .ld_byte(ld_byte), .ld_data(ld_data),
@@ -219,15 +257,19 @@ module tt_um_relwire #(
   reg [25:0] dout;
   assign instr = dout;
   integer ig;
-  always @(posedge clk)
-    for (ig = 0; ig < NC; ig = ig + 1)
-      if (cores_rst) ireg[ig] <= 0;
-      else if (parking && park_core == ig) ireg[ig] <= instr;
-  always @(posedge clk) begin
-    if (sram_we) prog_mem[sram_waddr[6:0]] <= sram_wdata;
-    else if (cores_rst) dout <= 0;
-    else if (fetching) dout <= prog_mem[pc[fetch_core][6:0]];
-  end
+  always @(posedge clk or negedge rst_ni)
+    if (!rst_ni) ireg <= 0;
+    else if (cores_rst) ireg <= 0;
+    else
+      for (ig = 0; ig < NC; ig = ig + 1)
+        if (parking && park_core == ig) ireg[26*ig+:26] <= instr;
+  always @(posedge clk) if (sram_we) prog_mem[sram_waddr[6:0]] <= sram_wdata;
+  always @(posedge clk or negedge rst_ni)
+    if (!rst_ni) dout <= 0;
+    else if (!sram_we) begin
+      if (cores_rst) dout <= 0;
+      else if (fetching) dout <= prog_mem[pc[fetch_core][6:0]];
+    end
 
   // ---------------- pins ----------------
   // one loop variable per always block: a shared one would have two drivers
@@ -244,13 +286,16 @@ module tt_um_relwire #(
     end
   end
 
-  always @(posedge clk) begin
-    if (cores_rst) begin
+  always @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      pin_oe <= 0;
+      pin_out <= 0;
+    end else if (cores_rst) begin
       pin_oe <= 0;
       pin_out <= 0;
     end else if (slot == 0) begin
       for (wp = 0; wp < NW; wp = wp + 1)
-        case (wres[wp])
+        case (wres[2*wp+:2])
           2'd1: begin pin_oe[wp] <= any0[wp]; pin_out[wp] <= 1'b0; end
           2'd2: begin pin_oe[wp] <= any1[wp]; pin_out[wp] <= 1'b1; end
           default: begin pin_oe[wp] <= anyoe[wp]; pin_out[wp] <= any1[wp]; end
@@ -264,8 +309,8 @@ module tt_um_relwire #(
   // ---------------- status ----------------
   reg [2:0] last_code;
   reg [CB-1:0] last_core;
-  always @(posedge clk)
-    if (!rst_n) begin
+  always @(posedge clk or negedge rst_ni)
+    if (!rst_ni) begin
       last_code <= 0;
       last_core <= 0;
     end else
