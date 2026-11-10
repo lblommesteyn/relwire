@@ -1,0 +1,65 @@
+# JTAG (IEEE 1149.1): an instruction-register scan, then a data-register scan.
+# Four wires, which is every protocol wire the chip has. The probe owns TCK,
+# TMS and TDI; the target owns TDO. TMS is framing, so its bits are literals:
+# an observer checks that the TAP is walked through the states this program
+# says. Everything is sampled on the rising edge of TCK.
+#
+# From Run-Test/Idle: Select-DR, Select-IR, Capture-IR, Shift-IR (4 bits, the
+# last with TMS high), Update-IR, Idle; then Select-DR, Capture-DR, Shift-DR
+# (8 bits), Update-DR, Idle.
+
+const half = 2200ns   # TCK at about 227 kHz
+
+wire TCK push_pull pull_down
+wire TMS push_pull pull_up
+wire TDI push_pull pull_up
+wire TDO push_pull floating
+
+field ir[4]      from probe    # instruction shifted in
+field ir_cap[4]  from target   # what the target's IR captured
+field dr_in[8]   from probe
+field dr_out[8]  from target
+lit   tms1 = 1   from probe
+lit   tms0 = 0   from probe
+time  rise, fall from probe
+
+# one TCK cycle that only moves the TAP
+macro step(m) {
+  put    TMS m[0]
+  edge   TCK -> 1 @rise in [half, inf]
+  sample TMS m[0]
+  edge   TCK -> 0 @fall in [half, inf]
+}
+
+# one TCK cycle in a shift state: a bit in on TDI, a bit out on TDO
+macro shift(m, din, dout, i) {
+  put    TMS m[0]
+  put    TDI din[i]
+  put    TDO dout[i]
+  edge   TCK -> 1 @rise in [half, inf]
+  sample TMS m[0]
+  sample TDI din[i]
+  sample TDO dout[i]
+  edge   TCK -> 0 @fall in [half, inf]
+}
+
+protocol {
+  use step(tms1)                       # Select-DR-Scan
+  use step(tms1)                       # Select-IR-Scan
+  use step(tms0)                       # Capture-IR
+  use step(tms0)                       # Shift-IR
+  repeat i 3 { use shift(tms0, ir, ir_cap, i) }
+  use shift(tms1, ir, ir_cap, 3)       # last bit, to Exit1-IR
+  use step(tms1)                       # Update-IR
+  use step(tms0)                       # Run-Test/Idle
+  use step(tms1)                       # Select-DR-Scan
+  use step(tms0)                       # Capture-DR
+  use step(tms0)                       # Shift-DR
+  repeat i 7 { use shift(tms0, dr_in, dr_out, i) }
+  use shift(tms1, dr_in, dr_out, 7)    # last bit, to Exit1-DR
+  use step(tms1)                       # Update-DR
+  use step(tms0)                       # Run-Test/Idle
+}
+
+constraint "tCKH": rise -> fall >= half
+constraint "tCKL": fall -> rise >= half

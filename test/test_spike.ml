@@ -420,6 +420,71 @@ let () =
      && List.exists (fun e -> e.var = "crc15") (outcomes o6 Mismatch)
      && not (List.exists (fun e -> e.var = "stuff") (outcomes o6 Mismatch)));
 
+  print_endline "15c. protocols added as programs only: JTAG, 1-Wire, PS/2";
+  let ex220 f = Rw_parse.program_of_file ~tick_ns:220 ("../examples/" ^ f) in
+  let jt = ex220 "jtag.rw" in
+  let jp = make_agent ~name:"P" jt (Run_as [ "probe" ])
+      ~inputs:[ ("ir", bits "1010"); ("dr_in", bits "11001010") ]
+  and jg = make_agent ~name:"T" jt (Run_as [ "target" ])
+      ~inputs:[ ("ir_cap", bits "0001"); ("dr_out", bits "01011100") ]
+  and jo = observer_of jt "O" in
+  ignore (simulate ~wires:jt.wires ~agents:[ jp; jg; jo ] ~ticks:1500 ());
+  check "JTAG: the probe reads what the target shifts out, the target what the probe shifts in"
+    (field_value jp "ir_cap" = "0001" && field_value jp "dr_out" = "01011100"
+     && List.for_all
+          (fun x -> field_value x "ir" = "1010" && field_value x "dr_in" = "11001010")
+          [ jg; jo ]
+     && field_value jo "ir_cap" = "0001" && field_value jo "dr_out" = "01011100");
+  check "JTAG: TMS walks the TAP as written (no mismatch); all finished"
+    (List.for_all (fun x -> outcomes x Mismatch = [] && clean x && done_ x) [ jp; jg; jo ]);
+
+  let ow = ex220 "onewire.rw" in
+  let ow_master () =
+    make_agent ~name:"M" ow (Run_as [ "master" ]) ~inputs:[ ("cmd", bits "11001100") ] in
+  let om = ow_master ()
+  and od1 = make_agent ~name:"D" ow (Run_as [ "device" ]) ~inputs:[ ("rom", bits "00010100") ]
+  and oo = observer_of ow "O" in
+  ignore (simulate ~wires:ow.wires ~agents:[ om; od1; oo ] ~ticks:9500 ());
+  check "1-Wire: write slots carry the command to the device, read slots its byte to the master"
+    (List.for_all (fun x -> field_value x "cmd" = "11001100") [ od1; oo ]
+     && List.for_all (fun x -> field_value x "rom" = "00010100") [ om; oo ]);
+  check "1-Wire: presence inside its window, no faults, all finished"
+    (List.for_all
+       (fun x -> clean x && outcomes x Arbitration_lost = [] && outcomes x Mismatch = [] && done_ x)
+       [ om; od1; oo ]);
+  let lone = ow_master () in
+  ignore (simulate ~wires:ow.wires ~agents:[ lone ] ~ticks:9500 ());
+  check "1-Wire: with no device on the wire, the master reports the missed presence"
+    (List.exists (fun e -> e.var = "presence") (outcomes lone Deadline_missed));
+
+  let ps = ex220 "ps2.rw" in
+  let ps_run data =
+    let d = make_agent ~name:"D" ps (Run_as [ "device" ]) ~inputs:[ ("data", bits data) ]
+    and h = make_agent ~name:"H" ps (Run_as [ "host" ]) ~inputs:[] in
+    let tr = simulate ~wires:ps.wires ~agents:[ d; h ] ~ticks:4800 () in
+    (d, h, tr)
+  in
+  let pd, ph, ptr = ps_run "01101000" in
+  let _, ph1, _ = ps_run "01100000" in
+  check "PS/2: the host reads the byte and an odd parity nobody was given"
+    (field_value ph "data" = "01101000" && field_value ph "par" = "0"
+     && field_value ph1 "par" = "1"
+     && List.for_all (fun x -> outcomes x Mismatch = [] && clean x && done_ x) [ pd; ph; ph1 ]);
+  let at = (List.find (fun e -> e.var = "data" && e.bit = 4) (List.rev pd.events)).tick in
+  let flipd tr =
+    List.map
+      (fun (t, vs) ->
+        if t >= at - 100 && t < at + 50 then
+          (t, List.map (fun (w, l) -> if w = "DATA" then (w, if l = L0 then L1 else L0) else (w, l)) vs)
+        else (t, vs))
+      tr
+  in
+  let ph2 = make_agent ~name:"H" ps (Run_as [ "host" ]) ~inputs:[] in
+  ignore (simulate ~wires:ps.wires ~agents:[ ph2 ] ~raw:[ replay (flipd ptr) ps.wires ] ~ticks:4800 ());
+  check "PS/2: a corrupted data bit is a parity error (Mismatch on par)"
+    (field_value ph2 "data" = "01100000"
+     && List.exists (fun e -> e.var = "par") (outcomes ph2 Mismatch));
+
   print_endline "16. branch lint and I2C read-or-write";
   let early =
     { (I2c.address_byte) with

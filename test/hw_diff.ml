@@ -154,6 +154,20 @@ let () =
       (Run_as [ "tx" ], [ ("id", "00000101111"); ("dlc", "0001"); ("data", "11110000") ]);
       (Run_as [ "rx" ], [ ("ack", "0") ]);
       (Observe_all, []) ];
+  (* protocols added as programs only, at the chip's real 220 ns tick *)
+  let ex220 f = Rw_parse.program_of_file ~tick_ns:220 ("../examples/" ^ f) in
+  scenario "jtag" (ex220 "jtag.rw") ~ticks:1200
+    [ (Run_as [ "probe" ], [ ("ir", "1010"); ("dr_in", "11001010") ]);
+      (Run_as [ "target" ], [ ("ir_cap", "0001"); ("dr_out", "01011100") ]);
+      (Observe_all, []) ];
+  scenario "onewire" (ex220 "onewire.rw") ~ticks:9500
+    [ (Run_as [ "master" ], [ ("cmd", "11001100") ]);
+      (Run_as [ "device" ], [ ("rom", "00010100") ]);
+      (Observe_all, []) ];
+  scenario "onewire_no_device" (ex220 "onewire.rw") ~ticks:4000
+    [ (Run_as [ "master" ], [ ("cmd", "11001100") ]); (Observe_all, []) ];
+  scenario "ps2" (ex220 "ps2.rw") ~ticks:4800
+    [ (Run_as [ "device" ], [ ("data", "01101000") ]); (Run_as [ "host" ], []); (Observe_all, []) ];
   (* Random programs (the projection fuzzer's generator) through the RTL:
      every role as a core plus an observer, single issue, compiled to one
      shared binary; with and without a second controller in arbitration. *)

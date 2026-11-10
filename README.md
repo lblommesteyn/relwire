@@ -102,13 +102,25 @@ the R/W bit), SPI (full duplex), UART, Manchester, CAN (bit stuffing as a branch
 on shared wire history, arbitration, stuff errors; `can_crc.rw` computes the
 CRC-15 on the chip).
 
+Three more were added after the hardware was fixed, as programs only, with no
+change to the chip or the compiler:
+
+* **JTAG** (`jtag.rw`): an IR scan and a DR scan on all four wires. TMS bits
+  are literals, so an observer checks the TAP walk.
+* **1-Wire** (`onewire.rw`): reset, presence, a byte written, a byte read, at
+  standard-speed timing. A write slot and a read slot are the same statements;
+  who owns the bit decides who holds the wire. Presence is a time the device
+  owns, so a missing device is a missed deadline.
+* **PS/2** (`ps2.rw`): device to host. Its odd parity is the checksum register
+  at degree 1.
+
 ## How it is checked
 
 | layer | check |
 |---|---|
 | semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation |
 | projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier; 2,400 runs at 300 seeds |
-| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 8 protocol scenarios plus random programs, through the pin-level top and its loader |
+| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 14 protocol scenarios plus random programs, through the pin-level top and its loader |
 | symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. One swap and one 4-cycle generate S4, so six runs cover all of S4 x S4 x S4 (13,824 relabellings), on RTL and on the gate-level netlist |
 | netlist vs RTL | `hw/gl/`: the routed netlist, cycle for cycle on every output pin |
 | in CI | [tt-relwire](https://github.com/lblommesteyn/tt-relwire): Tiny Tapeout's GDS build, precheck, and cocotb tests on RTL and gate level |
@@ -216,8 +228,8 @@ Current result (CI on [tt-relwire](https://github.com/lblommesteyn/tt-relwire/ac
   in-frame resynchronization.
 * The consistency claim is argued and fuzzed, not mechanized.
 * The program memory, as flip-flops, dominates area and hold buffering.
-* The checksum is tested with CRC-15 only. The register starts at zero and is
-  sent uninverted, so CRCs that start at all ones or are sent inverted (USB)
+* The checksum is tested with CRC-15 and with parity (degree 1). The register
+  starts at zero and is sent uninverted, so CRCs that start at all ones or are sent inverted (USB)
   are not expressible yet.
 * The gate-level tests run an I2C program; the checksum is checked against the
   reference model at RTL, not on the netlist.
