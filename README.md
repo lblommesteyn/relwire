@@ -154,10 +154,12 @@ per core, runs the chip and decodes what each core saw. Its loader stream is
 byte-identical to the one the RTL and gate-level tests run. It has not run on a
 board: there is no silicon yet.
 
-## Physical design (Tiny Tapeout, IHP CMOS5L, 6x4 tiles)
+## Physical design (Tiny Tapeout, IHP CMOS5L, 8x4 tiles)
 
 `tapeout/` holds the Tiny Tapeout project; `export_tt_repo.sh` generates the
-submission repository, and `setup_local.sh`/`harden.sh` mirror its CI locally.
+submission repository. CI builds with the March 2027 shuttle's action tag,
+`ttihp27a` (LibreLane 3.1.0.dev4). `setup_local.sh`/`harden.sh` mirror the
+earlier `ihp-cmos5l` action and have not been moved to the new pins.
 
 What the physical flow taught the architecture:
 
@@ -179,24 +181,43 @@ What the physical flow taught the architecture:
 * With timing healthy, placement-stage repair margins (aim 30% inside the
   slew/cap limits, buffer long wires) cut the slew warnings by a third and the
   cap warnings almost entirely, and 50 MHz closes.
+* Moving to the shuttle's toolchain grew the netlist by 10%: the cell library
+  has no flop without a reset pin, the resets were synchronous, and the new
+  flow ties each unused pin high with its own tie cell (4,526 of them). At 6x4
+  that put the floorplan at 60% and placement failed after hold repair. The
+  design moved to 8x4, the confirmed maximum.
+* On the new netlist the gate-level test read X. Synthesis had folded the
+  synchronous clear of one loop-index bit into `X | ~X`: always 0 in silicon,
+  but X in simulation when the flop starts unknown, and the bit never left X.
+  A three-valued replay of the netlist traced it to that bit; forcing the one
+  bit to 0 made the test pass. The fix is structural, not a nudge to
+  synthesis: `rst_n` goes through a two-flop synchronizer (asynchronous
+  assert, synchronous release) to the flops' reset pins, so every state
+  register is known in reset however the logic is built. The run/stop clear
+  stays synchronous. Only the program memory and the constant table, which the
+  loader writes, are not reset.
 
 Current result (CI on [tt-relwire](https://github.com/lblommesteyn/tt-relwire/actions)):
 
 | | |
 |---|---|
 | Tiny Tapeout precheck | passed |
-| gate-level cocotb test | passed |
+| gate-level cocotb tests (7, six of them symmetry) | passed |
 | DRC (router, Magic) / LVS | 0 / 0 |
-| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +3.14 ns |
-| setup, typical corner | met, +8.01 ns |
+| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +9.57 ns |
+| setup, typical corner | met, +11.87 ns |
 | hold, fast corner | met, +0.11 ns |
-| utilization | 68% of 1289 x 711 um |
-| open warnings | 115 max-slew, 3 max-cap (slow corner) |
+| utilization | 53% of 1724 x 711 um |
+| max-slew / max-cap violations | 0 / 0 in every corner |
 
 ## Open questions
 
 * CAN is modelled with hard synchronization on start of frame only, not
   in-frame resynchronization.
 * The consistency claim is argued and fuzzed, not mechanized.
-* The program memory, as flip-flops, dominates area, hold buffering and the
-  remaining slew warnings.
+* The program memory, as flip-flops, dominates area and hold buffering.
+* The checksum is tested with CRC-15 only. The register starts at zero and is
+  sent uninverted, so CRCs that start at all ones or are sent inverted (USB)
+  are not expressible yet.
+* The gate-level tests run an I2C program; the checksum is checked against the
+  reference model at RTL, not on the netlist.

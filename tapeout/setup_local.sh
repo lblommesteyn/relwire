@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Local mirror of TinyTapeout/tt-gds-action@ihp-cmos5l (WSL Ubuntu-22.04, root,
 # Docker running). Installs the PDK, the TT tools and LibreLane under $TT_HOME.
+#
+# STALE: CI now uses tt-gds-action@ttihp27a, which differs from the pins below:
+# LibreLane 3.1.0.dev4, IHP-Open-PDK 89d42ee6d2fd9b50b86a1aada6fee6673c3e6008
+# installed through ciel, tt-support-tools main, and tt_tool.py --pdk
+# ihp-sg13cmos5l in place of --ihp. A local harden with this script will not
+# match CI (the newer flow synthesizes about 10% more cells).
 set -euo pipefail
 TT_HOME=${TT_HOME:-/root/tt}
 PDK_ROOT=$TT_HOME/pdk
