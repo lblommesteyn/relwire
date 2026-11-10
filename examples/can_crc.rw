@@ -1,0 +1,76 @@
+# CAN 2.0A base frame, one data byte, with the CRC computed on the chip.
+# Nobody is given the checksum. Every role folds the bits it samples, SOF to
+# the end of the data, into a 15-bit register (stuff bits are not folded). The
+# transmitter then sends the register; everyone else checks the wire against
+# their own. NRZ, sampled at 75%, hard sync on SOF.
+# Bit stuffing branches on wire history that every role has sampled, so
+# every specialization takes the branch together. 100 ticks per bit.
+
+const seg1 = 75
+const seg2 = 25
+
+wire CAN dominant_low pull_up
+
+field   id[11]  from tx
+field   dlc[4]  from tx
+field   data[8] from tx
+crc     crc15[15] poly 0x4599 from tx   # x^15+x^14+x^10+x^8+x^7+x^4+x^3+1
+field   ack[1]  from rx
+lit     dominant  = 0 from tx
+lit     recessive = 1 from tx
+derived stuff from tx
+time    sof from tx
+
+macro stuff_check() {
+  if_run CAN 5 set stuff {
+    put    CAN stuff[0]
+    after  sample seg1
+    sample CAN stuff[0]
+    after  boundary seg2
+  }
+}
+
+macro plain(f, i) {
+  put    CAN f[i]
+  after  sample seg1
+  sample CAN f[i]
+  after  boundary seg2
+}
+
+macro stuffed(f, i) {
+  use plain(f, i)
+  use stuff_check()
+}
+
+# a stuffed bit that the CRC covers
+macro covered(f, i) {
+  put    CAN f[i]
+  after  sample seg1
+  sample CAN f[i] into crc15
+  after  boundary seg2
+  use stuff_check()
+}
+
+protocol {
+  edge   CAN -> 0 @sof in [10, inf]
+  after  sample seg1
+  sample CAN dominant[0] into crc15
+  after  boundary seg2
+  use stuff_check()
+  repeat i 11 { use covered(id, i) }
+  use covered(dominant, 0)    # RTR
+  use covered(dominant, 0)    # IDE
+  use covered(dominant, 0)    # r0
+  repeat i 4  { use covered(dlc, i) }
+  repeat i 8  { use covered(data, i) }
+  repeat i 15 { use stuffed(crc15, i) }
+  use plain(recessive, 0)     # CRC delimiter
+  use plain(ack, 0)
+  use plain(recessive, 0)     # ACK delimiter
+  repeat i 7  { use plain(recessive, 0) }
+}
+
+# Bit timing must hold on every path, stuffed or not.
+constraint "bit":      boundary -> boundary >= seg1 + seg2
+constraint "tSEG1":    boundary -> sample   >= seg1
+constraint "tSEG2":    sample   -> boundary >= seg2

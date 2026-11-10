@@ -10,7 +10,8 @@ let layout prog =
   let next = ref 0 in
   List.filter_map
     (function
-      | Field { name; width; _ } -> let b = !next in next := b + width; Some (name, b)
+      | Field { name; width; _ } | Crc { name; width; _ } ->
+          let b = !next in next := b + width; Some (name, b)
       | Lit { name; _ } | Derived { name; _ } -> let b = !next in incr next; Some (name, b)
       | Time _ -> None)
     prog.decls
@@ -36,7 +37,9 @@ let role_ids prog =
   let roles =
     List.sort_uniq compare
       (List.map
-         (function Field { owner; _ } | Time { owner; _ } | Lit { owner; _ } | Derived { owner; _ } -> owner)
+         (function
+           | Field { owner; _ } | Time { owner; _ } | Lit { owner; _ } | Derived { owner; _ }
+           | Crc { owner; _ } -> owner)
          prog.decls)
   in
   if List.length roles > 4 then failwith "more than 4 roles";
@@ -63,6 +66,17 @@ let compile prog =
   let is_lit f =
     List.exists (function Lit { name; _ } | Derived { name; _ } -> name = f | _ -> false) prog.decls
   in
+  (* Checksum: PUT with bit 6 drives the register's top bit; SAMPLE with bit 6
+     folds the sampled level in, and with bit 5 compares against the top bit
+     instead of data memory (with the literal bit, so an observer checks). The
+     polynomial, left-aligned to 16 bits, lives in constant-table entry 7. *)
+  let crc = crc_of prog in
+  if List.length (List.filter (function Crc _ -> true | _ -> false) prog.decls) > 1 then
+    failwith "more than one crc";
+  (match crc with
+   | Some (_, w, poly) when w < 1 || w > 16 || poly lsr w <> 0 -> failwith "a crc is 1 to 16 bits and its polynomial must fit in them"
+   | _ -> ());
+  let is_crc f = match crc with Some (n, _, _) -> n = f | None -> false in
   let consts = ref [] in
   let clamp v = if v >= inf then inf else v in
   let find_seq vs =
@@ -107,10 +121,18 @@ let compile prog =
     | Put { wire; field; idx } | Put_not { wire; field; idx } as st ->
         let ad, ix = resolve env lv field idx in
         let inv = match st with Put_not _ -> true | _ -> false in
-        [ hdr 2 (own_of (owner_of prog field)) (w wire) inv lor mem false ix ad ]
+        [ hdr 2 (own_of (owner_of prog field)) (w wire) inv lor mem false ix ad
+          lor (if is_crc field then 1 lsl 6 else 0) ]
     | Sample { wire; field; idx } ->
         let ad, ix = resolve env lv field idx in
-        [ hdr 3 (own_of (owner_of prog field)) (w wire) false lor mem (is_lit field) ix ad ]
+        if is_crc field then
+          [ hdr 3 (own_of (owner_of prog field)) (w wire) false lor mem true ix ad
+            lor (1 lsl 6) lor (1 lsl 5) ]
+        else [ hdr 3 (own_of (owner_of prog field)) (w wire) false lor mem (is_lit field) ix ad ]
+    | Sample_into { wire; field; idx; _ } ->
+        let ad, ix = resolve env lv field idx in
+        [ hdr 3 (own_of (owner_of prog field)) (w wire) false lor mem (is_lit field) ix ad
+          lor (1 lsl 6) ]
     | After { ticks; _ } -> [ hdr 4 None 0 false lor (k ticks lsl 13) ]
     | Toggle { wire; field; idx; nominal; min_after; max_after; _ } ->
         let ad, ix = resolve env lv field idx in
@@ -139,14 +161,19 @@ let compile prog =
   in
   (match List.rev lay with
    | (f, b) :: _ ->
-       let width = match List.find_opt (function Field { name; _ } -> name = f | _ -> false) prog.decls with
-         | Some (Field { width; _ }) -> width | _ -> 1 in
+       let width = match List.find_opt (function Field { name; _ } | Crc { name; _ } -> name = f | _ -> false) prog.decls with
+         | Some (Field { width; _ }) | Some (Crc { width; _ }) -> width | _ -> 1 in
        if b + width > dw then failwith "data memory overflow"
    | [] -> ());
   let words = Array.of_list (go [] None prog.body @ [ 0 ]) in
   if Array.length words > 128 then failwith "program larger than 128 instructions";
   let c = Array.make 8 0 in
   List.iteri (fun i v -> c.(i) <- v) !consts;
+  (match crc with
+   | Some (_, w, poly) ->
+       if List.length !consts > 7 then failwith "a crc leaves room for 7 timing constants";
+       c.(7) <- poly lsl (16 - w)
+   | None -> ());
   { words; consts = c }
 
 let data_bits prog (a : agent) =
@@ -258,7 +285,7 @@ let image_py ?(source = "") prog =
           prog.wires));
   let width name =
     List.find_map
-      (function Field { name = n; width; _ } when n = name -> Some width
+      (function (Field { name = n; width; _ } | Crc { name = n; width; _ }) when n = name -> Some width
               | (Lit { name = n; _ } | Derived { name = n; _ }) when n = name -> Some 1
               | _ -> None)
       prog.decls
