@@ -1,0 +1,46 @@
+# 1-Wire: reset, presence, a command byte written, a byte read back.
+# One open-drain wire. The master starts every time slot by pulling the wire
+# low; what happens next depends only on who owns the bit. A write slot and a
+# read slot are the same four statements: for a master-owned bit the master
+# holds the wire low (0) or lets it go (1), and for a device-owned bit the
+# master lets go and the device does the same thing. No statement says "read".
+#
+# Presence is a time owned by the device: with no device on the wire, the
+# master's window for it runs out and it reports a missed deadline.
+# Standard-speed timing; compile with relwirec --tick-ns.
+
+const t_rstl = 480us   # reset low
+const t_pdh  = 15us    # release to presence: 15 to 60 us
+const t_pdl  = 60us    # presence low, and the rest of a slot
+const t_rec  = 5us     # recovery between slots, and the master's start pulse
+const t_smp  = 10us    # then the bit is sampled, 15 us into the slot
+
+wire OW dominant_low pull_up
+
+field cmd[8]  from master
+field rom[8]  from device
+lit   idle = 1 from master
+time  rst, rst_end, slot  from master
+time  presence, presence_end from device
+
+macro bit_slot(f, i) {
+  edge   OW -> 0 @slot in [t_rec, inf]   # the master opens the slot
+  after  start t_rec
+  put    OW f[i]                         # the bit's owner drives; everyone else lets go
+  after  mid t_smp
+  sample OW f[i]
+  after  rest t_pdl
+  put    OW idle[0]                      # everyone lets go
+}
+
+protocol {
+  edge OW -> 0 @rst          in [t_rec, inf]
+  edge OW -> 1 @rst_end      in [t_rstl, inf]
+  edge OW -> 0 @presence     in [t_pdh, t_pdl]
+  edge OW -> 1 @presence_end in [t_pdl, inf]
+  repeat i 8 { use bit_slot(cmd, i) }
+  repeat i 8 { use bit_slot(rom, i) }
+}
+
+constraint "tRSTL": rst  -> rst_end >= t_rstl
+constraint "tSLOT": slot -> rest    >= t_pdl
