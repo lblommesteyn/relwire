@@ -4,6 +4,10 @@ on:
   push:
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash  # with pipefail, so a failure piped into tee still fails the step
+
 jobs:
   test:
     runs-on: ubuntu-24.04
