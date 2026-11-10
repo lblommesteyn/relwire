@@ -244,7 +244,7 @@ module tt_um_relwire #(
           .tick(tick), .now(now), .prev(prev), .res(res), .instr(ireg[26*g+:26]),
           .role_mask(masks[4*g+:4]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
           .ev_valid(ev_valid[g]), .ev_code(ev_code[g]), .ev_addr(ev_addr[g]),
-          .halted(halted[g]), .ksel_a(ksa[g]), .ksel_b(ksb[g]), .ka(ka[g]), .kb(kb[g]),
+          .halted(halted[g]), .ksel_a(ksa[g]), .ksel_b(ksb[g]), .ka(ka[g]), .kb(kb[g]), .kp(kt[7]),
           .ld_we(ld_we && ld_core == g), .ld_byte(ld_byte), .ld_data(ld_data),
           .dmem(dmem[g]));
     end
