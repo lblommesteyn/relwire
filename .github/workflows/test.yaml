@@ -1,0 +1,33 @@
+name: test
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      # OCaml 4.14 and dune 3 from the distribution; hw_diff runs the RTL in Icarus.
+      - name: Install OCaml, dune and Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ocaml ocaml-dune iverilog
+
+      - name: Build
+        run: dune build 2>&1 | tee build.log
+
+      # semantics (test_spike), projections (fuzz), RTL vs reference model (hw_diff)
+      - name: Test
+        run: dune test --force 2>&1 | tee test.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-logs
+          path: |
+            build.log
+            test.log
