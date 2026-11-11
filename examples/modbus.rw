@@ -1,0 +1,70 @@
+# Modbus RTU, the shortest request there is: Read Exception Status (function
+# 07) is an address byte, a function byte and the CRC-16. Four UART characters,
+# 8 data bits LSB first, no parity, two stop bits.
+#
+# Nobody is given the CRC. Modbus starts the register at all ones (init) and
+# sends it as it is, low byte first. Start and stop bits are not folded. The
+# usual description of this CRC shifts right with the polynomial reversed
+# (0xA001); on a wire that is the same register read from the other end, so
+# sending its top bit first is "low byte first, LSB first".
+
+const half = 26us        # 19200 baud
+const gap  = half * 3    # mid stop bit to the next start: two stop bits
+
+wire TXD push_pull pull_up
+
+field addr[8]  from master
+field func[8]  from master
+crc   crc16[16] poly 0x8005 init 0xFFFF from master   # x^16 + x^15 + x^2 + 1
+lit   start_lo = 0 from master
+lit   stop_hi  = 1 from master
+time  start from master
+
+macro char_start() {
+  edge   TXD -> 0 @start in [gap, inf]
+  after  mid half
+  sample TXD start_lo[0]
+}
+
+macro char_stop() {
+  after  boundary half
+  put    TXD stop_hi[0]
+  after  mid half
+  sample TXD stop_hi[0]
+}
+
+macro covered(f, i) {
+  after  boundary half
+  put    TXD f[i]
+  after  mid half
+  sample TXD f[i] into crc16
+}
+
+macro crc_bit(i) {
+  after  boundary half
+  put    TXD crc16[i]
+  after  mid half
+  sample TXD crc16[i]
+}
+
+protocol {
+  use char_start()
+  repeat i 8 { use covered(addr, i) }
+  use char_stop()
+  use char_start()
+  repeat i 8 { use covered(func, i) }
+  use char_stop()
+  use char_start()
+  repeat i 8 { use crc_bit(i) }          # CRC low byte
+  use char_stop()
+  use char_start()
+  use crc_bit(8)                         # CRC high byte
+  use crc_bit(9)
+  use crc_bit(10)
+  use crc_bit(11)
+  use crc_bit(12)
+  use crc_bit(13)
+  use crc_bit(14)
+  use crc_bit(15)
+  use char_stop()
+}
