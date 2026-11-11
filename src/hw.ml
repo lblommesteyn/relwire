@@ -69,7 +69,9 @@ let compile prog =
   (* Checksum: PUT with bit 6 drives the register's top bit; SAMPLE with bit 6
      folds the sampled level in, and with bit 5 compares against the top bit
      instead of data memory (with the literal bit, so an observer checks). The
-     polynomial, left-aligned to 16 bits, lives in constant-table entry 7. *)
+     polynomial, left-aligned to 16 bits, lives in constant-table entry 7. A
+     checksum sent complemented sets the level bit of both; a nonzero start
+     value is a SETCRC as the program's first instruction. *)
   let crc = crc_of prog in
   if List.length (List.filter (function Crc _ -> true | _ -> false) prog.decls) > 1 then
     failwith "more than one crc";
@@ -77,6 +79,10 @@ let compile prog =
    | Some (_, w, poly) when w < 1 || w > 16 || poly lsr w <> 0 -> failwith "a crc is 1 to 16 bits and its polynomial must fit in them"
    | _ -> ());
   let is_crc f = match crc with Some (n, _, _) -> n = f | None -> false in
+  let crc_init, crc_inv = crc_cfg prog in
+  (match crc with
+   | Some (_, w, _) when crc_init lsr w <> 0 -> failwith "a crc's start value must fit in its width"
+   | _ -> ());
   let consts = ref [] in
   let clamp v = if v >= inf then inf else v in
   let find_seq vs =
@@ -121,12 +127,13 @@ let compile prog =
     | Put { wire; field; idx } | Put_not { wire; field; idx } as st ->
         let ad, ix = resolve env lv field idx in
         let inv = match st with Put_not _ -> true | _ -> false in
+        let inv = if is_crc field then inv <> crc_inv else inv in
         [ hdr 2 (own_of (owner_of prog field)) (w wire) inv lor mem false ix ad
           lor (if is_crc field then 1 lsl 6 else 0) ]
     | Sample { wire; field; idx } ->
         let ad, ix = resolve env lv field idx in
         if is_crc field then
-          [ hdr 3 (own_of (owner_of prog field)) (w wire) false lor mem true ix ad
+          [ hdr 3 (own_of (owner_of prog field)) (w wire) crc_inv lor mem true ix ad
             lor (1 lsl 6) lor (1 lsl 5) ]
         else [ hdr 3 (own_of (owner_of prog field)) (w wire) false lor mem (is_lit field) ix ad ]
     | Sample_into { wire; field; idx; _ } ->
@@ -165,7 +172,12 @@ let compile prog =
          | Some (Field { width; _ }) | Some (Crc { width; _ }) -> width | _ -> 1 in
        if b + width > dw then failwith "data memory overflow"
    | [] -> ());
-  let words = Array.of_list (go [] None prog.body @ [ 0 ]) in
+  let seed =
+    match crc with
+    | Some (_, w, _) when crc_init <> 0 -> [ hdr 10 None 0 false lor (crc_init lsl (16 - w)) ]
+    | _ -> []
+  in
+  let words = Array.of_list (seed @ go [] None prog.body @ [ 0 ]) in
   if Array.length words > 128 then failwith "program larger than 128 instructions";
   let c = Array.make 8 0 in
   List.iteri (fun i v -> c.(i) <- v) !consts;

@@ -485,6 +485,114 @@ let () =
     (field_value ph2 "data" = "01100000"
      && List.exists (fun e -> e.var = "par") (outcomes ph2 Mismatch));
 
+  print_endline "15d. checksums that start at all ones or are sent complemented";
+  (* The reference model against the published check values: the checksum of
+     the nine characters "123456789", each named CRC with its own polynomial,
+     start value, final complement and bit order. *)
+  let nine = "123456789" in
+  let catalogue (name, width, poly, init, inv, reflected, chk) =
+    let src =
+      Printf.sprintf
+        "wire C push_pull pull_down\nwire D push_pull pull_up\nfield msg[72] from tx\n\
+         crc c[%d] poly %d init %d%s from tx\ntime r, f from tx\nprotocol {\n\
+         repeat i 72 {\nput D msg[i]\nedge C -> 1 @r in [5, inf]\nsample D msg[i] into c\n\
+         edge C -> 0 @f in [5, inf]\n}\n\
+         repeat i %d {\nput D c[i]\nedge C -> 1 @r in [5, inf]\nsample D c[i]\n\
+         edge C -> 0 @f in [5, inf]\n}\n}\n"
+        width poly init (if inv then " invert" else "") width
+    in
+    let p = Rw_parse.program_of_string src in
+    let bit v k = if (v lsr k) land 1 = 1 then '1' else '0' in
+    let msg =
+      String.concat ""
+        (List.init 9 (fun j ->
+             String.init 8 (fun k -> bit (Char.code nine.[j]) (if reflected then k else 7 - k))))
+    in
+    let want = String.init width (fun i -> bit chk (if reflected then i else width - 1 - i)) in
+    let t = make_agent ~name:"T" p (Run_as [ "tx" ]) ~inputs:[ ("msg", bits msg) ]
+    and o = observer_of p "O" in
+    ignore (simulate ~wires:p.wires ~agents:[ t; o ] ~ticks:2500 ());
+    check (Printf.sprintf "%s: the wire carries 0x%x" name chk)
+      (field_value o "c" = want && outcomes o Mismatch = [] && clean o && done_ t && done_ o)
+  in
+  List.iter catalogue
+    [ ("CRC-5/USB (ones, complemented, LSB first)", 5, 0x05, 0x1f, true, true, 0x19);
+      ("CRC-7/MMC", 7, 0x09, 0, false, false, 0x75);
+      ("CRC-8/MAXIM, 1-Wire (LSB first)", 8, 0x31, 0, false, true, 0xa1);
+      ("CRC-15/CAN", 15, 0x4599, 0, false, false, 0x059e);
+      ("CRC-16/XMODEM", 16, 0x1021, 0, false, false, 0x31c3);
+      ("CRC-16/ARC (LSB first)", 16, 0x8005, 0, false, true, 0xbb3d);
+      ("CRC-16/IBM-3740 (ones)", 16, 0x1021, 0xffff, false, false, 0x29b1);
+      ("CRC-16/GENIBUS (ones, complemented)", 16, 0x1021, 0xffff, true, false, 0xd64e);
+      ("CRC-16/MODBUS (ones, LSB first)", 16, 0x8005, 0xffff, false, true, 0x4b37);
+      ("CRC-16/USB (ones, complemented, LSB first)", 16, 0x8005, 0xffff, true, true, 0xb4c8);
+      ("CRC-16/X-25, HDLC (ones, complemented, LSB first)", 16, 0x1021, 0xffff, true, true, 0x906e) ];
+  (* an independent reference in the usual right-shifting form *)
+  let crc_ref ~width ~polyrev ~init ~xorout lvls =
+    let v =
+      List.fold_left
+        (fun c b ->
+          let fb = (c lxor (if b = L1 then 1 else 0)) land 1 in
+          let c = c lsr 1 in
+          if fb = 1 then c lxor polyrev else c)
+        init lvls
+    in
+    let v = v lxor xorout in
+    String.init width (fun i -> if (v lsr i) land 1 = 1 then '1' else '0')
+  in
+  let mb = ex220 "modbus.rw" in
+  let mb_run addr func =
+    let m = make_agent ~name:"M" mb (Run_as [ "master" ])
+        ~inputs:[ ("addr", bits addr); ("func", bits func) ]
+    and s = make_agent ~name:"S" mb (Run_as [ "slave" ]) ~inputs:[]
+    and o = observer_of mb "O" in
+    ignore (simulate ~wires:mb.wires ~agents:[ m; s; o ] ~ticks:12000 ());
+    (m, s, o)
+  in
+  (* slave 0x11, function 07: the frame is 11 07 4C 22 *)
+  let mm, ms, mo = mb_run "10001000" "11100000" in
+  check "Modbus RTU: 11 07 goes out with CRC 4C 22, which nobody was given"
+    (List.for_all (fun x -> field_value x "crc16" = "0011001001000100") [ ms; mo ]
+     && List.for_all (fun x -> field_value x "addr" = "10001000" && field_value x "func" = "11100000") [ ms; mo ]
+     && List.for_all (fun x -> outcomes x Mismatch = [] && clean x && done_ x) [ mm; ms; mo ]);
+  let _, ms2, _ = mb_run "01010101" "11000000" in
+  check "Modbus RTU: another frame agrees with the right-shifting reference (0xA001)"
+    (field_value ms2 "crc16"
+     = crc_ref ~width:16 ~polyrev:0xA001 ~init:0xffff ~xorout:0 (bits "0101010111000000"));
+  let ut = ex220 "usb_token.rw" in
+  let ut_host addr endp =
+    make_agent ~name:"H" ut (Run_as [ "host" ])
+      ~inputs:[ ("pid", bits "10000111"); ("addr", bits addr); ("endp", bits endp) ]
+  in
+  (* OUT to address 0x15, endpoint 0xE *)
+  let uh = ut_host "1010100" "0111" and ud = make_agent ~name:"D" ut (Run_as [ "device" ]) ~inputs:[]
+  and uo = observer_of ut "O" in
+  let utr = simulate ~wires:ut.wires ~agents:[ uh; ud; uo ] ~ticks:1200 () in
+  check "USB token: address 0x15, endpoint 0xE carry CRC-5 10111"
+    (List.for_all (fun x -> field_value x "crc5" = "10111") [ ud; uo ]
+     && crc_ref ~width:5 ~polyrev:0x14 ~init:0x1f ~xorout:0x1f (bits "10101000111") = "10111"
+     && List.for_all (fun x -> outcomes x Mismatch = [] && clean x && done_ x) [ uh; ud; uo ]);
+  let uh2 = ut_host "0101110" "1000" and uo2 = observer_of ut "O" in
+  ignore (simulate ~wires:ut.wires ~agents:[ uh2; uo2 ] ~ticks:1200 ());
+  check "USB token: another token agrees with the right-shifting reference (0x14)"
+    (field_value uo2 "crc5"
+     = crc_ref ~width:5 ~polyrev:0x14 ~init:0x1f ~xorout:0x1f (bits "01011101000")
+     && outcomes uo2 Mismatch = [] && done_ uo2);
+  let at = (List.find (fun e -> e.var = "addr" && e.bit = 3) (List.rev uh.events)).tick in
+  let flipu tr =
+    List.map
+      (fun (t, vs) ->
+        if t >= at - 5 && t < at + 5 then
+          (t, List.map (fun (w, l) -> if w = "DATA" then (w, if l = L0 then L1 else L0) else (w, l)) vs)
+        else (t, vs))
+      tr
+  in
+  let uo3 = observer_of ut "O" in
+  ignore (simulate ~wires:ut.wires ~agents:[ uo3 ] ~raw:[ replay (flipu utr) ut.wires ] ~ticks:1200 ());
+  check "USB token: a corrupted address bit is a CRC error (Mismatch on crc5)"
+    (field_value uo3 "addr" = "1011100"
+     && List.exists (fun e -> e.var = "crc5") (outcomes uo3 Mismatch));
+
   print_endline "16. branch lint and I2C read-or-write";
   let early =
     { (I2c.address_byte) with
