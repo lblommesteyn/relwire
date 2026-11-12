@@ -83,7 +83,7 @@ register. See [docs/semantics.md](docs/semantics.md).
 | `put W f[i]` / `put_not W f[i]` | drive the bit (or its complement) | release W |
 | `sample W f[i]` | check the wire: a mismatch is lost arbitration | bind the bit (literals: check) |
 | `sample W f[i] into c` | the same, and fold the sampled level into checksum `c` | same |
-| `put W c[i]`, `sample W c[i]` for a `crc c[n] poly P` | drive the checksum register's top bit | check the wire against their own register |
+| `put W c[i]`, `sample W c[i]` for a `crc c[n] poly P [init V] [invert]` | drive the checksum register's top bit (complemented with `invert`) | check the wire against their own register |
 | `toggle W f[i] @t at n in [a, b]` | edge whose new level is the bit | accept a transition in the window, bind, re-anchor |
 | `after t n` | timer mark `n` after the anchor | same |
 | `if f[i] == v { }`, `if_run W n { }` | branch on bits everyone has sampled | same branch |
@@ -95,6 +95,13 @@ same argument that lets a branch test wire history. The owner sends it and the
 rest check it. One instruction per 220 ns tick leaves a CAN bit about four
 instructions at 1 Mbit/s, far too few to compute a CRC-15 in the program, so
 the fold is part of `sample` and costs no instructions.
+
+A CRC is named by more than its polynomial. `init V` starts the register at
+`V` instead of zero (all ones for Modbus, USB and HDLC) and `invert` sends it
+complemented (USB, HDLC). Bit order needs no option: the register is sent top
+bit first, and a CRC described as "LSB first, polynomial reversed" is the same
+register read from the other end. The reference model reproduces the published
+check value of eleven named CRCs from 5 to 16 bits (`test/test_spike.ml`, 15d).
 
 Wires declare a resolution (`push_pull`, `dominant_low`, `dominant_high`) and a
 bias (`pull_up`, `pull_down`, `floating`). Examples: I2C (write, read-or-write on
@@ -114,13 +121,22 @@ change to the chip or the compiler:
 * **PS/2** (`ps2.rw`): device to host. Its odd parity is the checksum register
   at degree 1.
 
+Two more came with the checksum's start value and complemented send:
+
+* **Modbus RTU** (`modbus.rw`): a Read Exception Status request, four UART
+  characters. The CRC-16 starts at all ones and goes out low byte first; for
+  slave 0x11 the frame is `11 07 4C 22`.
+* **USB token fields** (`usb_token.rw`): PID, address, endpoint and the CRC-5,
+  which starts at all ones and is sent complemented. This is the packet on a
+  clock and a data wire, not the USB line code.
+
 ## How it is checked
 
 | layer | check |
 |---|---|
 | semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation |
 | projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier; 2,400 runs at 300 seeds |
-| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 14 protocol scenarios plus random programs, through the pin-level top and its loader |
+| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 16 protocol scenarios plus random programs, through the pin-level top and its loader |
 | symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. One swap and one 4-cycle generate S4, so six runs cover all of S4 x S4 x S4 (13,824 relabellings), on RTL and on the gate-level netlist |
 | netlist vs RTL | `hw/gl/`: the routed netlist, cycle for cycle on every output pin |
 | in CI | [tt-relwire](https://github.com/lblommesteyn/tt-relwire): Tiny Tapeout's GDS build, precheck, and cocotb tests on RTL and gate level |
@@ -145,7 +161,9 @@ Tapeout top `tt_um_relwire`.
   speed is data, not code.
 * A 16-bit checksum register per core steps as an LFSR on a folding sample.
   The polynomial is data too (table entry 7, left-aligned), so one register
-  serves CRC-5, CRC-15 and CRC-16.
+  serves CRC-5, CRC-15 and CRC-16. A `SETCRC` instruction gives it a start
+  value; the level bit of a checksum `put` or `sample` complements it on the
+  wire.
 * 4 cores, a 128 x 26 flip-flop program memory with time-multiplexed fetch, a
   2-flop synchronizer on the protocol pins, a byte-wide loader and readback.
 * **Single issue**: one instruction per core per tick, a tick being 11 cycles
@@ -228,8 +246,7 @@ Current result (CI on [tt-relwire](https://github.com/lblommesteyn/tt-relwire/ac
   in-frame resynchronization.
 * The consistency claim is argued and fuzzed, not mechanized.
 * The program memory, as flip-flops, dominates area and hold buffering.
-* The checksum is tested with CRC-15 and with parity (degree 1). The register
-  starts at zero and is sent uninverted, so CRCs that start at all ones or are sent inverted (USB)
-  are not expressible yet.
+* One checksum per program, at most 16 bits: no CRC-32, and no USB data
+  packet next to its token (two polynomials).
 * The gate-level tests run an I2C program; the checksum is checked against the
   reference model at RTL, not on the netlist.

@@ -168,6 +168,15 @@ let () =
     [ (Run_as [ "master" ], [ ("cmd", "11001100") ]); (Observe_all, []) ];
   scenario "ps2" (ex220 "ps2.rw") ~ticks:4800
     [ (Run_as [ "device" ], [ ("data", "01101000") ]); (Run_as [ "host" ], []); (Observe_all, []) ];
+  (* checksums that start at all ones (a SETCRC instruction) and are sent complemented *)
+  scenario "modbus" (ex220 "modbus.rw") ~ticks:12000
+    [ (Run_as [ "master" ], [ ("addr", "10001000"); ("func", "11100000") ]);
+      (Run_as [ "slave" ], []);
+      (Observe_all, []) ];
+  scenario "usb_token" (ex220 "usb_token.rw") ~ticks:1200
+    [ (Run_as [ "host" ], [ ("pid", "10000111"); ("addr", "1010100"); ("endp", "0111") ]);
+      (Run_as [ "device" ], []);
+      (Observe_all, []) ];
   (* Random programs (the projection fuzzer's generator) through the RTL:
      every role as a core plus an observer, single issue, compiled to one
      shared binary; with and without a second controller in arbitration. *)
