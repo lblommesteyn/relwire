@@ -130,15 +130,22 @@ Two more came with the checksum's start value and complemented send:
   which starts at all ones and is sent complemented. This is the packet on a
   clock and a data wire, not the USB line code.
 
+All five are certified at the chip's 220 ns tick with one instruction per tick
+(`test/test_spike.ml`, 15e): every `constraint` holds on every path, and no
+role can fall behind an edge it must watch. The certificate checks the ticks
+the source rounds to, so the Modbus bit is 238 ticks, 52.36 us against 52.08
+us at 19200 baud, 0.5% slow and inside a UART's tolerance.
+
 ## How it is checked
 
 | layer | check |
 |---|---|
-| semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation |
+| semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation, eleven named CRCs against their published check values |
 | projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier; 2,400 runs at 300 seeds |
 | RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 16 protocol scenarios plus random programs, through the pin-level top and its loader |
 | symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. One swap and one 4-cycle generate S4, so six runs cover all of S4 x S4 x S4 (13,824 relabellings), on RTL and on the gate-level netlist |
 | netlist vs RTL | `hw/gl/`: the routed netlist, cycle for cycle on every output pin |
+| checksum on the netlist | `tapeout/test/test.py`: a USB token whose CRC-5 nobody is given (start at all ones, sent complemented); the receiving cores must check it and bind `10111`, on RTL and gate level |
 | in CI | [tt-relwire](https://github.com/lblommesteyn/tt-relwire): Tiny Tapeout's GDS build, precheck, and cocotb tests on RTL and gate level |
 
 Planted bugs are caught at each layer: a stuff bit not complemented, a loop one
@@ -232,7 +239,7 @@ Current result, with the finished checksum (CI on [tt-relwire](https://github.co
 | | |
 |---|---|
 | Tiny Tapeout precheck | passed |
-| gate-level cocotb tests (7, six of them symmetry) | passed |
+| gate-level cocotb tests (8: I2C, six symmetry, the CRC-5 token) | passed |
 | DRC (router, Magic) / LVS | 0 / 0 |
 | setup, slow corner 1.08 V / 125 C, 50 MHz | met, +9.16 ns |
 | setup, typical corner | met, +11.60 ns |
@@ -249,5 +256,3 @@ Current result, with the finished checksum (CI on [tt-relwire](https://github.co
 * The program memory, as flip-flops, dominates area and hold buffering.
 * One checksum per program, at most 16 bits: no CRC-32, and no USB data
   packet next to its token (two polynomials).
-* The gate-level tests run an I2C program; the checksum is checked against the
-  reference model at RTL, not on the netlist.

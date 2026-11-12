@@ -2,7 +2,9 @@
 """Three cores on one chip run the same I2C program as controller, target and
 sniffer. The test programs the chip over its pins, lets the transaction run,
 then reads every core's data memory back and compares it, bit by bit, with
-the RelWire reference model (expected.txt, from tools/gen_tt_test)."""
+the RelWire reference model (expected.txt, from tools/gen_tt_test). A second
+case (usb_token/) runs a program whose CRC-5 nobody is given: the register
+starts at all ones and is sent complemented."""
 
 import os
 
@@ -14,10 +16,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TICK_CYCLES = 11  # 5 + 2 (pin synchronizer) + 4 cores
 
 
-def read_vectors():
-    with open(os.path.join(HERE, "load.hex")) as f:
+def read_vectors(case=""):
+    d = os.path.join(HERE, case)
+    with open(os.path.join(d, "load.hex")) as f:
         stream = [int(l, 16) for l in f if l.strip()]
-    with open(os.path.join(HERE, "expected.txt")) as f:
+    with open(os.path.join(d, "expected.txt")) as f:
         lines = [l.split() for l in f if l.strip()]
     ticks = int(lines[0][2])
     expected = {int(c): bits for c, bits in lines[1:]}
@@ -75,8 +78,8 @@ def relabel(stream, cores, wires, roles):
     return out
 
 
-async def run_case(dut, cores=IDENT, wires=IDENT, roles=IDENT):
-    stream, ticks, expected = read_vectors()
+async def run_case(dut, cores=IDENT, wires=IDENT, roles=IDENT, case=""):
+    stream, ticks, expected = read_vectors(case)
     stream = relabel(stream, cores, wires, roles)
     expected = {cores[c]: bits for c, bits in expected.items()}
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
@@ -143,3 +146,10 @@ async def test_symmetry_roles_swap(dut):
 @cocotb.test()
 async def test_symmetry_roles_cycle(dut):
     await run_case(dut, roles=CYCLE)
+
+
+# The checksum on the chip: SETCRC starts the register at all ones, the CRC-5
+# goes out complemented, and the receiving cores check it and bind it.
+@cocotb.test()
+async def test_usb_token_crc5_nobody_is_given(dut):
+    await run_case(dut, case="usb_token")
