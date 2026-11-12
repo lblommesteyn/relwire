@@ -1,0 +1,43 @@
+# The fields of a USB token packet and their CRC-5: PID, 7-bit address, 4-bit
+# endpoint, then the checksum, every field LSB first as USB sends them.
+#
+# This is the packet, not the USB line code: the bits go out on a clock and a
+# data wire, without NRZI, bit stuffing or the differential pair. It is here
+# for the checksum, which is the awkward kind: the register starts at all ones
+# (init) and is sent complemented (invert), over the address and endpoint only.
+# Nobody is given the CRC.
+
+const half = 2200ns
+
+wire CLK  push_pull pull_down
+wire DATA push_pull pull_up
+
+field pid[8]   from host
+field addr[7]  from host
+field endp[4]  from host
+crc   crc5[5] poly 0x05 init 0x1F invert from host   # x^5 + x^2 + 1
+time  rise, fall from host
+
+macro cell(f, i) {
+  put    DATA f[i]
+  edge   CLK -> 1 @rise in [half, inf]
+  sample DATA f[i]
+  edge   CLK -> 0 @fall in [half, inf]
+}
+
+macro covered(f, i) {
+  put    DATA f[i]
+  edge   CLK -> 1 @rise in [half, inf]
+  sample DATA f[i] into crc5
+  edge   CLK -> 0 @fall in [half, inf]
+}
+
+protocol {
+  repeat i 8 { use cell(pid, i) }
+  repeat i 7 { use covered(addr, i) }
+  repeat i 4 { use covered(endp, i) }
+  repeat i 5 { use cell(crc5, i) }
+}
+
+constraint "tCKH": rise -> fall >= half
+constraint "tCKL": fall -> rise >= half

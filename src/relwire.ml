@@ -62,8 +62,11 @@ type decl =
      x^width term) and folds into it the wire levels of the samples marked
      [Sample_into]. The owner drives the register's top bit; everyone else
      checks the wire against their own. They agree because they folded the
-     same wire history, which is why this needs no new projection rule. *)
-  | Crc of { name : string; width : int; poly : int; owner : role }
+     same wire history, which is why this needs no new projection rule.
+     The register starts at [init]. With [inv] the checksum goes onto the wire
+     complemented (and is complemented back before it is folded in, so sending
+     it still shifts the register out). *)
+  | Crc of { name : string; width : int; poly : int; init : int; inv : bool; owner : role }
 
 (* Constraint endpoints: an edge (by time variable) or a Put onto a wire. *)
 type event_ref = At of string | Change of string
@@ -151,6 +154,10 @@ let crc_of prog =
     (function Crc { name; width; poly; _ } -> Some (name, width, poly) | _ -> None)
     prog.decls
 
+let crc_cfg prog =
+  List.find_map (function Crc { init; inv; _ } -> Some (init, inv) | _ -> None) prog.decls
+  |> Option.value ~default:(0, false)
+
 let specialize prog assignment =
   let is_crc f = match crc_of prog with Some (n, _, _) -> n = f | None -> false in
   let own_of role =
@@ -230,7 +237,9 @@ let specialize prog assignment =
           ( (IBranch { cond; skip = List.length t + 1 } :: t) @ (IJump (List.length e) :: e),
             both )
   in
-  Array.of_list (fst (go [] [] prog.body))
+  (* a nonzero start value is an instruction of its own on the hardware *)
+  let seed = if fst (crc_cfg prog) <> 0 then [ INop ] else [] in
+  Array.of_list (seed @ fst (go [] [] prog.body))
 
 (* ---------- machine ---------- *)
 
@@ -268,6 +277,7 @@ type agent = {
   issue : int option;  (* instructions completed per tick; None = run until blocked *)
   crc_def : (string * int * int) option;  (* checksum field, width, polynomial *)
   mutable crc : int;  (* the checksum register *)
+  crc_inv : bool;  (* the checksum is sent complemented *)
 }
 
 let crc_msb a =
@@ -282,6 +292,11 @@ let crc_fold a lv =
       let r = (a.crc lsl 1) land ((1 lsl w) - 1) in
       a.crc <- (if fb then r lxor poly else r)
   | None -> ()
+
+let flip = function L0 -> L1 | L1 -> L0
+
+(* the level a checksum bit has on the wire *)
+let crc_out a = if a.crc_inv then flip (crc_msb a) else crc_msb a
 
 let is_crc_field a f = match a.crc_def with Some (n, _, _) -> n = f | None -> false
 
@@ -304,7 +319,7 @@ let make_agent ?(clock = 1.0) ?(in_sync = 0) ?(out_delay = 0) ?issue ~name prog 
     specs = List.map (fun w -> (w.name, w)) prog.wires;
     pc = 0; phase = Ready; anchor = 0; demoted = [];
     drives = Hashtbl.create 4; env; hist = Hashtbl.create 4; events = [];
-    clock; in_sync; out_delay; issue; crc_def = crc_of prog; crc = 0;
+    clock; in_sync; out_delay; issue; crc_def = crc_of prog; crc = fst (crc_cfg prog); crc_inv = snd (crc_cfg prog);
     lits =
       List.filter_map
         (function Lit { name; _ } | Derived { name; _ } -> Some (name, ()) | _ -> None)
@@ -331,7 +346,7 @@ let step a ~tick ~now ~prev =
            match effective a role own with
            | Supplied -> (
                match
-                 if is_crc_field a field then Some (crc_msb a) else (Hashtbl.find a.env field).(bit)
+                 if is_crc_field a field then Some (crc_out a) else (Hashtbl.find a.env field).(bit)
                with
                | Some lv ->
                    let lv = if inv then (if lv = L0 then L1 else L0) else lv in
@@ -351,7 +366,7 @@ let step a ~tick ~now ~prev =
           | _ -> ());
          (match (now wire, effective a role own) with
           | V lv, Supplied ->
-              let mine = if crcf then Some (crc_msb a) else cell.(bit) in
+              let mine = if crcf then Some (crc_out a) else cell.(bit) in
               if mine = Some lv then log a tick Match field bit
               else begin
                 cell.(bit) <- Some lv;
@@ -361,13 +376,16 @@ let step a ~tick ~now ~prev =
               end
           | V lv, Observed when crcf ->
               (* a received checksum bit is checked against the local register *)
-              if crc_msb a <> lv then log a tick Mismatch field bit else cell.(bit) <- Some lv
+              if crc_out a <> lv then log a tick Mismatch field bit else cell.(bit) <- Some lv
           | V lv, Observed -> (
               match (List.mem_assoc field a.lits, cell.(bit)) with
               | true, Some expect when expect <> lv -> log a tick Mismatch field bit
               | _ -> cell.(bit) <- Some lv)
           | (Float | Contention), _ -> log a tick Bad_wire field bit);
-         (if fold then match now wire with V lv -> crc_fold a lv | _ -> ());
+         (if fold then
+            match now wire with
+            | V lv -> crc_fold a (if crcf && a.crc_inv then flip lv else lv)
+            | _ -> ());
          a.pc <- a.pc + 1
      | IBranch { cond; skip } ->
          let taken =

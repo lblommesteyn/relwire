@@ -372,7 +372,9 @@ let top st =
       kw st "from";
       st.decls <- st.decls @ [ Derived { name; owner = ident st } ]
   | Id "crc" ->
-      (* crc NAME[width] poly P from ROLE: P without its x^width term *)
+      (* crc NAME[width] poly P [init V] [invert] from ROLE: P without its
+         x^width term, V the register's start value, invert to send it
+         complemented *)
       ignore (next st);
       let name = ident st in
       expect st "[";
@@ -380,8 +382,10 @@ let top st =
       expect st "]";
       kw st "poly";
       let poly = expr st in
+      let init = if peek st = Id "init" then (ignore (next st); expr st) else 0 in
+      let inv = if peek st = Id "invert" then (ignore (next st); true) else false in
       kw st "from";
-      st.decls <- st.decls @ [ Crc { name; width; poly; owner = ident st } ]
+      st.decls <- st.decls @ [ Crc { name; width; poly; init; inv; owner = ident st } ]
   | Id "time" ->
       ignore (next st);
       let rec names acc =
