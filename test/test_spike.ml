@@ -593,6 +593,25 @@ let () =
     (field_value uo3 "addr" = "1011100"
      && List.exists (fun e -> e.var = "crc5") (outcomes uo3 Mismatch));
 
+  print_endline "15e. timing certificates for the protocols added as programs (220 ns tick, single issue)";
+  List.iter
+    (fun (file, owner) ->
+      let p = ex220 file in
+      let c = certify ~issue:1 p (Run_as [ owner ]) in
+      print_certificate ~tick_ns:220 (Printf.sprintf "  %s, role %s" file owner) c;
+      check (Printf.sprintf "%s: every constraint holds on every path (%d)" file (List.length c))
+        (c <> [] && List.for_all (fun l -> l.pass) c
+         && List.for_all
+              (fun l -> match l.constr.spec_ns with
+                 | Some ns -> l.guaranteed.lo * 220 >= ns | None -> true)
+              c);
+      let hz =
+        List.concat_map (fun r -> reaction_hazards p (Run_as [ r ])) (Rw_parse.roles p @ [ "nobody" ])
+      in
+      check (Printf.sprintf "%s: no reaction hazards in any role" file) (hz = []))
+    [ ("jtag.rw", "probe"); ("onewire.rw", "master"); ("ps2.rw", "device");
+      ("modbus.rw", "master"); ("usb_token.rw", "host") ];
+
   print_endline "16. branch lint and I2C read-or-write";
   let early =
     { (I2c.address_byte) with
