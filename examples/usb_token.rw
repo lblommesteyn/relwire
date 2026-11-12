@@ -5,11 +5,13 @@
 # data wire, without NRZI, bit stuffing or the differential pair. It is here
 # for the checksum, which is the awkward kind: the register starts at all ones
 # (init) and is sent complemented (invert), over the address and endpoint only.
-# Nobody is given the CRC.
+# Nobody is given the CRC. The clock idles high; data changes after its
+# falling edge and is sampled on its rising edge. Both wires idle high, like
+# the gate-level testbench's bus.
 
 const half = 2200ns
 
-wire CLK  push_pull pull_down
+wire CLK  push_pull pull_up
 wire DATA push_pull pull_up
 
 field pid[8]   from host
@@ -19,17 +21,17 @@ crc   crc5[5] poly 0x05 init 0x1F invert from host   # x^5 + x^2 + 1
 time  rise, fall from host
 
 macro cell(f, i) {
-  put    DATA f[i]
+  edge   CLK -> 0 @fall in [half, inf]
+  put    DATA f[i]                       # data changes while the clock is low
   edge   CLK -> 1 @rise in [half, inf]
   sample DATA f[i]
-  edge   CLK -> 0 @fall in [half, inf]
 }
 
 macro covered(f, i) {
-  put    DATA f[i]
+  edge   CLK -> 0 @fall in [half, inf]
+  put    DATA f[i]                       # data changes while the clock is low
   edge   CLK -> 1 @rise in [half, inf]
   sample DATA f[i] into crc5
-  edge   CLK -> 0 @fall in [half, inf]
 }
 
 protocol {

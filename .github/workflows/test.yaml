@@ -27,6 +27,20 @@ jobs:
       - name: Test
         run: dune test --force 2>&1 | tee test.log
 
+      # the Tiny Tapeout cocotb vectors, as tapeout/export_tt_repo.sh makes them
+      - name: Generate the gate-level test vectors
+        run: |
+          mkdir -p tt_vectors
+          dune exec ./tools/gen_tt_test.exe tt_vectors
+          rm -f tt_vectors/cfg.hex tt_vectors/usb_token/cfg.hex
+          find tt_vectors -type f | sort
+
+      - name: Upload test vectors
+        uses: actions/upload-artifact@v7
+        with:
+          name: tt-vectors
+          path: tt_vectors
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v7

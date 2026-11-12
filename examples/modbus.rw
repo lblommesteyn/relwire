@@ -68,3 +68,5 @@ protocol {
   use crc_bit(15)
   use char_stop()
 }
+
+constraint "bit": mid -> mid >= half + half
