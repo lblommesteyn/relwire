@@ -11,7 +11,7 @@
 open Relwire
 
 let roles = [ "a"; "b"; "c" ]
-let forever = 1_000_000
+let forever = Relwire.inf
 let t_low = 24
 let t_high = 16
 

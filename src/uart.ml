@@ -5,7 +5,7 @@ open Relwire
 
 let bit = 100
 let half = bit / 2
-let forever = 1_000_000
+let forever = Relwire.inf
 
 let wires = [ { name = "TXD"; resolution = PushPull; bias = PullUp } ]
 

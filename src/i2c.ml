@@ -7,7 +7,7 @@ let t_low = 65 (* 1.3 us *)
 let t_high = 30 (* 0.6 us *)
 let t_su_dat = 5 (* 100 ns *)
 let t_su_sto = 30 (* 0.6 us *)
-let forever = 1_000_000
+let forever = Relwire.inf
 
 let wires =
   [ { name = "SCL"; resolution = DominantLow; bias = PullUp };

@@ -94,12 +94,24 @@ let kw st k =
   | Id x when x = k -> ignore (next st)
   | t -> err st (Printf.sprintf "expected '%s', found '%s'" k (show t))
 
+(* inf is not a number: arithmetic on it is refused, and finite results stay
+   far below it, so a finite expression can never become unbounded *)
+let arith st op a b =
+  if a = Relwire.inf || b = Relwire.inf then err st "inf cannot be used in arithmetic";
+  let big = 1 lsl 40 in
+  if abs a >= big || abs b >= big then err st "number too large";
+  match op with
+  | `Add -> a + b
+  | `Sub -> a - b
+  | `Mul -> a * b
+  | `Div -> if b = 0 then err st "division by zero" else a / b
+
 let rec expr st =
   let v = ref (term st) in
   let rec loop () =
     match peek st with
-    | Sym "+" -> ignore (next st); v := !v + term st; loop ()
-    | Sym "-" -> ignore (next st); v := !v - term st; loop ()
+    | Sym "+" -> ignore (next st); v := arith st `Add !v (term st); loop ()
+    | Sym "-" -> ignore (next st); v := arith st `Sub !v (term st); loop ()
     | _ -> ()
   in
   loop (); !v
@@ -108,8 +120,8 @@ and term st =
   let v = ref (atom st) in
   let rec loop () =
     match peek st with
-    | Sym "*" -> ignore (next st); v := !v * atom st; loop ()
-    | Sym "/" -> ignore (next st); v := !v / atom st; loop ()
+    | Sym "*" -> ignore (next st); v := arith st `Mul !v (atom st); loop ()
+    | Sym "/" -> ignore (next st); v := arith st `Div !v (atom st); loop ()
     | _ -> ()
   in
   loop (); !v
@@ -122,13 +134,9 @@ and atom st =
       ignore (next st);
       match unit_ns st n with
       | Some v ->
-          let t = (v + st.tick_ns - 1) / st.tick_ns in
-          (* 1_000_000 ticks is how the language spells inf *)
-          if t >= 1_000_000 then
-            err st (Printf.sprintf "%d ticks at %d ns is too long to be finite (inf is 1000000 ticks)" t st.tick_ns);
-          t
+          (v + st.tick_ns - 1) / st.tick_ns
       | None -> n)
-  | Id "inf" -> ignore (next st); 1_000_000
+  | Id "inf" -> ignore (next st); Relwire.inf
   | Id x -> (
       match Hashtbl.find_opt st.consts x with
       | Some v -> ignore (next st); v

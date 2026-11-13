@@ -193,6 +193,9 @@ let () =
   scenario "shadowed_loop"
     (ps "wire W push_pull pull_down field x[2] from tx protocol { repeat i 2 { repeat i 2 { put W x[i] after mark 5 sample W x[i] } } }")
     ~ticks:100 [ (Run_as [ "tx" ], [ ("x", "01") ]); (Observe_all, []) ];
+  scenario "shadowed_then_nested"
+    (ps "wire W push_pull pull_down field x[2] from tx protocol { repeat i 2 { repeat i 2 { repeat j 2 { put W x[j] after m 5 sample W x[j] } } } }")
+    ~ticks:200 [ (Run_as [ "tx" ], [ ("x", "01") ]); (Observe_all, []) ];
   scenario "push_pull_contention"
     (ps "wire W push_pull pull_down field x[1] from tx protocol { put W x[0] after mark 5 sample W x[0] }")
     ~ticks:30 [ (Run_as [ "tx" ], [ ("x", "0") ]); (Run_as [ "tx" ], [ ("x", "1") ]); (Observe_all, []) ];
