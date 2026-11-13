@@ -26,6 +26,8 @@ jobs:
       # semantics (test_spike), projections (fuzz), RTL vs reference model (hw_diff)
       - name: Test
         run: dune test --force 2>&1 | tee test.log
+        env:
+          RELWIRE_HW_DIR: ${{ github.workspace }}/hw_cases
 
       # the Tiny Tapeout cocotb vectors, as tapeout/export_tt_repo.sh makes them
       - name: Generate the gate-level test vectors
@@ -38,7 +40,7 @@ jobs:
       # RTL-vs-netlist pin cases for tt-relwire's gl_pins job
       - name: Collect the pin-level netlist cases
         run: |
-          tapeout/collect_gl_cases.sh tt_vectors/gl_pins
+          tapeout/collect_gl_cases.sh tt_vectors/gl_pins "$GITHUB_WORKSPACE/hw_cases"
           cp hw/gl/tb_pins.v hw/gl/run_gl.sh tt_vectors/gl_pins/
 
       # the demo-board library: the committed image is what relwirec emits, and
