@@ -121,7 +121,12 @@ and atom st =
   | Int n -> (
       ignore (next st);
       match unit_ns st n with
-      | Some v -> (v + st.tick_ns - 1) / st.tick_ns
+      | Some v ->
+          let t = (v + st.tick_ns - 1) / st.tick_ns in
+          (* 1_000_000 ticks is how the language spells inf *)
+          if t >= 1_000_000 then
+            err st (Printf.sprintf "%d ticks at %d ns is too long to be finite (inf is 1000000 ticks)" t st.tick_ns);
+          t
       | None -> n)
   | Id "inf" -> ignore (next st); 1_000_000
   | Id x -> (
@@ -434,6 +439,7 @@ let top st =
   | t -> err st (Printf.sprintf "expected a declaration, found '%s'" (show t))
 
 let program_of_string ?(tick_ns = 20) src =
+  if tick_ns <= 0 then raise (Parse_error (0, Printf.sprintf "tick of %d ns: it must be positive" tick_ns));
   let st = { toks = lex src; consts = Hashtbl.create 8; consts_ns = Hashtbl.create 8; tick_ns;
              macros = Hashtbl.create 8;
              wires = []; decls = []; body = None; constraints = [] } in

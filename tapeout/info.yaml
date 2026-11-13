@@ -35,7 +35,7 @@ pinout:
   uio[3]: "protocol wire 3"
   uio[4]: ""
   uio[5]: ""
-  uio[6]: "load framing reset (input)"
+  uio[6]: "load frame reset: stops the cores, clears roles (input)"
   uio[7]: "load byte strobe (input)"
 
 yaml_version: 6

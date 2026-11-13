@@ -59,8 +59,10 @@ every path at the chip's real tick. The cocotb tests below run on the RTL and
 on the routed gate-level netlist, and the netlist is also compared with the
 RTL on every output pin on every cycle for ten programs. Six of the cocotb
 tests are symmetry checks: renaming the cores, the wires or the role ids must
-rename the result and change nothing else (one swap and one 4-cycle generate
-each group of 24 permutations, so six runs cover all 13,824 relabellings).
+rename the result and change nothing else (one swap and one 4-cycle, the
+generators of each group of permutations, tested on the I2C configuration).
+Another reloads the chip in the middle of a transaction and checks that no core
+keeps a role from the earlier load.
 
 Source, language reference, compiler and the full test suites:
 https://github.com/lblommesteyn/relwire
@@ -69,7 +71,8 @@ https://github.com/lblommesteyn/relwire
 
 **Programming.** The chip is programmed through a byte-wide loader: put a byte
 on `ui_in` and pulse `uio[7]` (rising edge). `uio[6]` high resets the loader's
-framing. Commands (first byte, then arguments):
+framing, stops the cores and clears every core's role mask: start every load
+with it. Commands (first byte, then arguments):
 
 | bytes | meaning |
 |---|---|
@@ -91,7 +94,8 @@ Tapeout demo board (MicroPython). Compile for the tick your clock gives:
 **Status.** While running, `uo_out` shows `[7]` running, `[6]` all cores
 halted, `[5:3]` the code of the last event and `[2:1]` the core that raised it
 (1 match, 2 peer held the wire, 3 lost arbitration, 4 missed deadline, 5 early
-edge, 6 collision, 7 mismatch).
+edge, 6 collision or bad wire, 7 mismatch). Two cores driving a push-pull wire
+to opposite levels is a bad wire: the pin is released and every core is told.
 
 **A first test (I2C, no external parts).** Load `examples/i2c_ns.rw` with three
 cores: core 0 as controller (address and data byte in its data memory), core 1

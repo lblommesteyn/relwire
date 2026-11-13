@@ -58,6 +58,8 @@ let role_mask prog = function
 (* One binary for every role: owned instructions carry their owner's role
    id in [25:24] and bit 19 set; a core drives iff its mask has that role. *)
 let compile prog =
+  if List.length prog.wires > 4 then
+    failwith (Printf.sprintf "%d wires: the chip has 4" (List.length prog.wires));
   List.iter (fun (r, _) -> ignore (specialize prog (Run_as [ r ]))) (role_ids prog);
   let rid = role_ids prog in
   let own_of role = Some (List.assoc role rid) in
@@ -84,7 +86,17 @@ let compile prog =
    | Some (_, w, _) when crc_init lsr w <> 0 -> failwith "a crc's start value must fit in its width"
    | _ -> ());
   let consts = ref [] in
-  let clamp v = if v >= inf then inf else v in
+  (* 0xFFFF in the table means unbounded, so a finite value must stay below
+     it: a longer one is refused, not shortened (the certificate is of the
+     source values) *)
+  let clamp v =
+    if v >= 1_000_000 then inf
+    else if v >= inf then
+      failwith
+        (Printf.sprintf "a timing value of %d ticks does not fit the 16-bit table (at most %d): use a longer tick"
+           v (inf - 1))
+    else v
+  in
   let find_seq vs =
     let arr = Array.of_list !consts in
     let n = Array.length arr and m = List.length vs in
@@ -111,7 +123,9 @@ let compile prog =
     let o = match owner with Some r -> (r lsl 24) lor (1 lsl 19) | None -> 0 | _ -> 0 in
     o lor (op lsl 20) lor (wire lsl 17) lor (Bool.to_int lvl lsl 16)
   in
-  (* env: unrolled loop variables; lv: the hardware loop variable, if any *)
+  (* env: unrolled loop variables; lv: the hardware loop variable, if any.
+     An unrolled repeat that reuses lv's name shadows it: [one] drops lv for
+     its body, so the inner binding is the one found here. *)
   let resolve env lv field idx =
     match idx with
     | Const n -> (base field + n, false)
@@ -146,11 +160,13 @@ let compile prog =
         let kk = const_seq [ nominal; min_after; max_after ] in
         if kk > 5 then failwith "toggle constant triple does not fit";
         [ hdr 5 (own_of (owner_of prog field)) (w wire) false lor mem false ix ad lor kk ]
+    | Repeat { count = 0; _ } -> []  (* as the model: no iterations, no LOOP *)
     | Repeat { var; count; body } when lv = None ->
         let b = go env (Some var) body in
         if count > 255 || List.length b > 255 then failwith "loop too large";
-        (hdr 9 None 0 false lor (count lsl 8) lor List.length b) :: b
+        if b = [] then [] else (hdr 9 None 0 false lor (count lsl 8) lor List.length b) :: b
     | Repeat { var; count; body } ->
+        let lv = if lv = Some var then None else lv in
         List.concat (List.init count (fun i -> go ((var, i) :: env) lv body))
     | If_run { wire; n; set; body } ->
         let b = go env lv body in

@@ -92,10 +92,15 @@ class RelWireChip:
         p.wait(3)
 
     def load(self, image, cores):
+        # A frame reset restarts command framing, stops the cores and clears
+        # every role mask, so a core left out of this load cannot keep
+        # driving for the previous program. STOP after it is belt and braces
+        # (and the only stop on a chip that is mid-command).
         self.port.set_frame(1)
         self.port.wait(4)
         self.port.set_frame(0)
         self.port.wait(4)
+        self.send(CMD_STOP)
         for b in load_stream(image, cores):
             self.send(b)
 

@@ -158,16 +158,76 @@ let crc_cfg prog =
   List.find_map (function Crc { init; inv; _ } -> Some (init, inv) | _ -> None) prog.decls
   |> Option.value ~default:(0, false)
 
+(* One validation boundary for every program, before anything is lowered:
+   unique names, legal widths and counts, ordered timing windows. Index
+   bounds are checked as [specialize] resolves each index. *)
+let validate prog =
+  let dup what names =
+    let rec go seen = function
+      | [] -> ()
+      | n :: r -> if List.mem n seen then failwith (Printf.sprintf "%s %s declared twice" what n) else go (n :: seen) r
+    in
+    go [] names
+  in
+  dup "wire" (List.map (fun w -> w.name) prog.wires);
+  dup "name"
+    (List.map
+       (function
+         | Field { name; _ } | Time { name; _ } | Lit { name; _ } | Derived { name; _ } | Crc { name; _ } -> name)
+       prog.decls);
+  List.iter
+    (function
+      | Field { name; width; _ } | Crc { name; width; _ } when width < 1 ->
+          failwith (Printf.sprintf "%s has width %d; a field is at least 1 bit" name width)
+      | _ -> ())
+    prog.decls;
+  let window what lo hi =
+    if lo < 0 || hi < lo then failwith (Printf.sprintf "%s: window [%d, %d] is not 0 <= min <= max" what lo hi);
+    if hi > 1_000_000 then failwith (Printf.sprintf "%s: %d ticks is past inf (1000000)" what hi)
+  in
+  let rec st = function
+    | Edge { time; min_after; max_after; _ } -> window ("edge @" ^ time) min_after max_after
+    | Toggle { time; nominal; min_after; max_after; _ } ->
+        window ("toggle @" ^ time) min_after max_after;
+        if nominal < 0 then failwith ("toggle @" ^ time ^ ": negative nominal time")
+    | After { time; ticks } ->
+        if ticks < 0 || ticks >= 1_000_000 then failwith (Printf.sprintf "after %s: a delay of %d ticks" time ticks)
+    | Repeat { var; count; body } ->
+        if count < 0 then failwith (Printf.sprintf "repeat %s %d: negative count" var count);
+        List.iter st body
+    | If_run { body; _ } -> List.iter st body
+    | If_bit { then_; else_; _ } -> List.iter st then_; List.iter st else_
+    | Put _ | Put_not _ | Sample _ | Sample_into _ -> ()
+  in
+  List.iter st prog.body
+
+let width_of prog f =
+  List.find_map
+    (function
+      | (Field { name; width; _ } | Crc { name; width; _ }) when name = f -> Some width
+      | (Lit { name; _ } | Derived { name; _ }) when name = f -> Some 1
+      | _ -> None)
+    prog.decls
+
 let specialize prog assignment =
+  validate prog;
   let is_crc f = match crc_of prog with Some (n, _, _) -> n = f | None -> false in
   let own_of role =
     match assignment with
     | Observe_all -> Observed
     | Run_as roles -> if List.mem role roles then Supplied else Observed
   in
-  let ix env = function
+  let ix_raw env = function
     | Const n -> n
     | Loop v -> List.assoc v env
+  in
+  let ixf env field idx =
+    let b = ix_raw env idx in
+    (match width_of prog field with
+     | Some w when b >= 0 && b < w -> ()
+     | Some w -> failwith (Printf.sprintf "%s[%d] is out of range: %s has %d bit%s" field b field w (if w = 1 then "" else "s"))
+     | None -> failwith ("undeclared field " ^ field));
+    b
   in
   (* [sampled]: field bits bound on every path so far (the branch lint). *)
   (* [looped]: inside a repeat the hardware runs as its loop (the outermost
@@ -185,19 +245,19 @@ let specialize prog assignment =
         ([ IEdge { wire; level; time; role; own = own_of role; min_after; max_after } ], sampled)
     | Put { wire; field; idx } ->
         let role = owner_of prog field in
-        ([ IPut { wire; field; bit = ix env idx; role; own = own_of role; inv = false } ], sampled)
+        ([ IPut { wire; field; bit = ixf env field idx; role; own = own_of role; inv = false } ], sampled)
     | Put_not { wire; field; idx } ->
         let role = owner_of prog field in
-        ([ IPut { wire; field; bit = ix env idx; role; own = own_of role; inv = true } ], sampled)
+        ([ IPut { wire; field; bit = ixf env field idx; role; own = own_of role; inv = true } ], sampled)
     | Toggle { wire; field; idx; time; nominal; min_after; max_after } ->
         let role = owner_of prog field in
-        let bit = ix env idx in
+        let bit = ixf env field idx in
         ( [ IToggle { wire; field; bit; time; role; own = own_of role;
                       nominal; min_after; max_after } ],
           (field, bit) :: sampled )
     | Sample { wire; field; idx } ->
         let role = owner_of prog field in
-        let bit = ix env idx in
+        let bit = ixf env field idx in
         (* the checksum's own bits are folded too: what is sent is the top
            bit, so folding it shifts the register *)
         ( [ ISample { wire; field; bit; role; own = own_of role; fold = is_crc field } ],
@@ -205,10 +265,11 @@ let specialize prog assignment =
     | Sample_into { wire; field; idx; crc } ->
         if not (is_crc crc) then failwith (crc ^ " is not a declared crc");
         let role = owner_of prog field in
-        let bit = ix env idx in
+        let bit = ixf env field idx in
         ( [ ISample { wire; field; bit; role; own = own_of role; fold = true } ],
           (field, bit) :: sampled )
     | After { time; ticks } -> ([ IAfter { time; ticks } ], sampled)
+    | Repeat { count = 0; _ } -> ([], sampled)  (* no iterations: no loop either *)
     | Repeat { var; count; body } ->
         let outer = not !looped in
         looped := true;
@@ -220,12 +281,17 @@ let specialize prog assignment =
         in
         let out, sampled = loop 0 [] sampled in
         if outer then looped := false;
-        ((if outer then [ INop ] else []) @ out, sampled)
+        ((if outer && out <> [] then [ INop ] else []) @ out, sampled)
     | If_run { wire; n; set; body } ->
         let b, _ = go env sampled body in
         (IBranch { cond = Run { wire; n; set }; skip = List.length b } :: b, sampled)
     | If_bit { field; idx; level; then_; else_ } ->
-        let bit = ix env idx in
+        let bit = ixf env field idx in
+        (* a literal or derived bit keeps its expected value when the wire
+           disagrees, while its demoted owner takes the wire's: the roles
+           would hold different values, so they are not branch conditions *)
+        if List.exists (function Lit { name; _ } | Derived { name; _ } -> name = field | _ -> false) prog.decls then
+          failwith (Printf.sprintf "branch on %s, a literal: test a field instead" field);
         if not (List.mem (field, bit) sampled) then
           failwith
             (Printf.sprintf "branch on %s[%d] before every role has sampled it" field bit);
@@ -367,7 +433,9 @@ let step a ~tick ~now ~prev =
          (match (now wire, effective a role own) with
           | V lv, Supplied ->
               let mine = if crcf then Some (crc_out a) else cell.(bit) in
-              if mine = Some lv then log a tick Match field bit
+              (* every role holds the wire's level of a checksum bit, so a
+                 branch on it takes the same path everywhere *)
+              if mine = Some lv then (cell.(bit) <- Some lv; log a tick Match field bit)
               else begin
                 cell.(bit) <- Some lv;
                 log a tick Arbitration_lost field bit;
@@ -376,7 +444,8 @@ let step a ~tick ~now ~prev =
               end
           | V lv, Observed when crcf ->
               (* a received checksum bit is checked against the local register *)
-              if crc_out a <> lv then log a tick Mismatch field bit else cell.(bit) <- Some lv
+              if crc_out a <> lv then log a tick Mismatch field bit;
+              cell.(bit) <- Some lv
           | V lv, Observed -> (
               match (List.mem_assoc field a.lits, cell.(bit)) with
               | true, Some expect when expect <> lv -> log a tick Mismatch field bit
@@ -460,13 +529,14 @@ let step a ~tick ~now ~prev =
          let finish () =
            a.anchor <- tick; a.phase <- Ready; a.pc <- a.pc + 1
          in
+         (* the deadline first: an edge after max is late, not accepted *)
          let await () =
-           if now wire = V level && prev wire <> V level then begin
-             if tick - a.anchor < min_after then log a tick Early_edge time 0;
+           if tick - a.anchor > max_after then begin
+             log a tick Deadline_missed time 0;
              finish ()
            end
-           else if tick - a.anchor > max_after then begin
-             log a tick Deadline_missed time 0;
+           else if now wire = V level && prev wire <> V level then begin
+             if tick - a.anchor < min_after then log a tick Early_edge time 0;
              finish ()
            end
            else continue := false
@@ -614,7 +684,7 @@ type tev = {
   mutable succ : (int * int) list;  (* (node, gap) *)
 }
 
-let schedule ?(io = ideal_io) prog assignment =
+let schedule_entry ?(io = ideal_io) prog assignment =
   let m = specialize prog assignment in
   let n = Array.length m in
   let node_of = Array.make n (-1) in
@@ -674,7 +744,11 @@ let schedule ?(io = ideal_io) prog assignment =
   Array.iteri
     (fun pc v -> if v >= 0 then evs.(v).succ <- List.sort_uniq compare (List.concat_map firsts (flow pc)))
     node_of;
-  evs
+  (* [entry]: the first events reached from the program start, with the
+     instructions before them counted as for any other edge of the graph *)
+  (evs, firsts 0)
+
+let schedule ?io prog assignment = fst (schedule_entry ?io prog assignment)
 
 type cert_line = {
   constr : constr;
@@ -779,8 +853,11 @@ let certify ?(io = ideal_io) ?issue prog assignment =
    legal time comes before the core can reach the wait instruction. *)
 let reaction_hazards ?(io = ideal_io) ?(issue = 1) prog assignment =
   ignore issue;
-  let evs = schedule ~io prog assignment in
+  let evs, entry = schedule_entry ~io prog assignment in
   let worst = Array.make (Array.length evs) 0 in
+  (* from the start: instruction j runs at tick j, so the event at the end of
+     a g-instruction prefix is reached at tick g - 1 (anchor 0) *)
+  List.iter (fun (s, g) -> worst.(s) <- max worst.(s) (g - 1)) entry;
   let pk = put_k evs ~issue:(Some 1) in
   Array.iteri
     (fun v ev ->

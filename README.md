@@ -146,9 +146,10 @@ us at 19200 baud, 0.5% slow and inside a UART's tolerance.
 | layer | check |
 |---|---|
 | semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation, eleven named CRCs against their published check values |
-| projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier; 2,400 runs at 300 seeds |
-| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 17 protocol scenarios plus random programs, through the pin-level top and its loader |
-| symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. One swap and one 4-cycle generate S4, so six runs cover all of S4 x S4 x S4 (13,824 relabellings), on RTL and on the gate-level netlist |
+| projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier, and every bound bit must agree across roles; 800 runs at 100 seeds in CI, 2,400 at 300 seeds with `dune exec ./test/fuzz.exe 300` |
+| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 17 protocol scenarios, 4 audit regressions and random programs, through the pin-level top and its loader |
+| symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. Six metamorphic runs, one swap and one 4-cycle per action (the generators of S4), on RTL and on the gate-level netlist. They test each generator on the I2C configuration; they are not a proof for all 13,824 relabellings, which would need the property at every intermediate configuration |
+| reload | `tapeout/test/test.py`: a reload in the middle of a transaction stops the cores, and no core keeps a role from the earlier load |
 | netlist vs RTL | `hw/gl/run_gl.sh`: the routed netlist against the RTL, every output pin on every cycle, for ten programs chosen to cover each mechanism once (`tapeout/collect_gl_cases.sh`); runs in tt-relwire's CI as `gl_pins` |
 | checksum on the netlist | `tapeout/test/test.py`: a USB token whose CRC-5 nobody is given (start at all ones, sent complemented); the receiving cores must check it and bind `10111`, on RTL and gate level |
 | in CI | [tt-relwire](https://github.com/lblommesteyn/tt-relwire): Tiny Tapeout's GDS build, precheck, and cocotb tests on RTL and gate level |
@@ -205,9 +206,11 @@ earlier `ihp-cmos5l` action and have not been moved to the new pins.
 
 What the physical flow taught the architecture:
 
-* The IHP SRAM macro does not fit CMOS5L's rules (user designs may not use
-  TopMetal1, and the macro's Metal4 power pins cannot reach the Metal4-only
-  grid without it), so the program memory is flip-flops.
+* We could not integrate the IHP SRAM macro in this design on CMOS5L: its
+  Metal4 power pins did not reach Tiny Tapeout's Metal4-only power grid
+  without TopMetal1, which we could not use here. Tiny Tapeout allows SRAM
+  macros in general; this was our integration problem, and the program memory
+  is flip-flops.
 * A shared constant-table read port steered by the executing core gave static
   timing a die-wide path from one core's instruction into another core's
   registers. Each core now has its own read ports, and its own instruction
@@ -244,7 +247,7 @@ Current result, with the finished checksum (CI on [tt-relwire](https://github.co
 | | |
 |---|---|
 | Tiny Tapeout precheck | passed |
-| gate-level cocotb tests (8: I2C, six symmetry, the CRC-5 token) | passed |
+| gate-level cocotb tests (9: I2C, six symmetry, the CRC-5 token, reload) | see [tt-relwire CI](https://github.com/lblommesteyn/tt-relwire/actions) |
 | DRC (router, Magic) / LVS | 0 / 0 |
 | setup, slow corner 1.08 V / 125 C, 50 MHz | met, +9.16 ns |
 | setup, typical corner | met, +11.60 ns |
@@ -257,7 +260,38 @@ Current result, with the finished checksum (CI on [tt-relwire](https://github.co
 
 * CAN is modelled with hard synchronization on start of frame only, not
   in-frame resynchronization.
-* The consistency claim is argued and fuzzed, not mechanized.
+* The consistency claim is argued and fuzzed, not mechanized. An external
+  audit (below) found that model/RTL agreement alone can miss a shared bug, so
+  the tests now also check invariants of their own: every role holds the same
+  bound bits and ends at the same instruction.
+* Timing certificates assume an ideal pin interface unless given `--io`
+  (synchronizer, output delay, skew, jitter); they are not a guarantee for pad
+  delay, pull-up rise time or metastability, none of which has been measured.
+* Nothing has run against an independent implementation of a protocol (a
+  real I2C or SPI peripheral, or an FPGA): every peer in the tests is another
+  RelWire core or the reference model.
 * The program memory, as flip-flops, dominates area and hold buffering.
 * One checksum per program, at most 16 bits: no CRC-32, and no USB data
   packet next to its token (two polynomials).
+
+## External audit (November 2026)
+
+An independent review ran extra programs against the model and the RTL and
+found eleven problems that the existing tests passed over. All are fixed and
+each has a regression test (`test/test_spike.ml` section 21, the audit
+scenarios in `test/hw_diff.ml`, the reload test in `tapeout/test/test.py`):
+
+| finding | fix |
+|---|---|
+| a branch on a sampled checksum bit went different ways in sender and observer (model and RTL agreed on the wrong run) | every role keeps the wire's level of a checksum bit; branches on literals are refused |
+| timing values of 65,535 ticks or more were shortened to 65,535 after certification, and a finite maximum became "unbounded" | refused at compile time; `inf` is the only unbounded value; a finite time of 1,000,000 ticks or more is refused by the parser |
+| a reload left omitted cores with their old roles, and the frame reset did not stop a running chip | the frame reset now stops the cores and clears every role mask; the host library also sends STOP |
+| `repeat i 0` ran its body once in hardware | zero-count loops are removed in the model and the compiler |
+| a nested `repeat i` that reused the name read the outer index | the inner binding shadows the hardware loop variable |
+| a fifth wire and out-of-range field indices were accepted and aliased other resources | one validation boundary: wire count, index bounds, unique names, widths, ordered windows, nonnegative counts and a positive tick |
+| an edge arriving on the first tick after its deadline was accepted | the deadline is checked first, in the model and the RTL, as for data edges |
+| reaction-hazard analysis ignored the instructions before the first timed event | the schedule has an entry node |
+| two cores driving a push-pull wire to opposite levels gave the 1 the wire | the chip detects it, releases the pin and reports a bad wire to every core, as the model's Contention |
+| the symmetry tests were described as covering all 13,824 relabellings | reworded: six metamorphic checks of the generators |
+| long vector paths were truncated by the testbench, which then hung | 1,024-character paths, missing inputs are a fatal error, and a watchdog |
+
