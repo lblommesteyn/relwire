@@ -150,7 +150,7 @@ us at 19200 baud, 0.5% slow and inside a UART's tolerance.
 | RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 17 protocol scenarios, 4 audit regressions and random programs, through the pin-level top and its loader |
 | symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. Six metamorphic runs, one swap and one 4-cycle per action (the generators of S4), on RTL and on the gate-level netlist. They test each generator on the I2C configuration; they are not a proof for all 13,824 relabellings, which would need the property at every intermediate configuration |
 | reload | `tapeout/test/test.py`: a reload in the middle of a transaction stops the cores, and no core keeps a role from the earlier load |
-| netlist vs RTL | `hw/gl/run_gl.sh`: the routed netlist against the RTL, every output pin on every cycle, for ten programs chosen to cover each mechanism once (`tapeout/collect_gl_cases.sh`); runs in tt-relwire's CI as `gl_pins` |
+| netlist vs RTL | `hw/gl/run_gl.sh`: the routed netlist against the RTL, every output pin on every cycle, for twelve programs chosen to cover each mechanism once (`tapeout/collect_gl_cases.sh`); runs in tt-relwire's CI as `gl_pins` |
 | checksum on the netlist | `tapeout/test/test.py`: a USB token whose CRC-5 nobody is given (start at all ones, sent complemented); the receiving cores must check it and bind `10111`, on RTL and gate level |
 | in CI | [tt-relwire](https://github.com/lblommesteyn/tt-relwire): Tiny Tapeout's GDS build, precheck, and cocotb tests on RTL and gate level |
 
