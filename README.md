@@ -242,19 +242,20 @@ What the physical flow taught the architecture:
   stays synchronous. Only the program memory and the constant table, which the
   loader writes, are not reset.
 
-Current result, with the finished checksum (CI on [tt-relwire](https://github.com/lblommesteyn/tt-relwire/actions)):
+Current result, with the audit fixes (CI on [tt-relwire](https://github.com/lblommesteyn/tt-relwire/actions)):
 
 | | |
 |---|---|
 | Tiny Tapeout precheck | passed |
-| gate-level cocotb tests (9: I2C, six symmetry, the CRC-5 token, reload) | see [tt-relwire CI](https://github.com/lblommesteyn/tt-relwire/actions) |
+| gate-level cocotb tests (9: I2C, six symmetry, the CRC-5 token, reload) | passed |
+| netlist vs RTL, every pin every cycle (`gl_pins`, 12 programs) | identical |
 | DRC (router, Magic) / LVS | 0 / 0 |
-| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +9.16 ns |
-| setup, typical corner | met, +11.60 ns |
+| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +10.10 ns |
+| setup, typical corner | met, +12.17 ns |
 | hold, fast corner | met, +0.10 ns |
-| utilization | 51% of 1724 x 711 um, 101,716 instances |
+| utilization | 52% of 1724 x 711 um, 102,476 instances |
 | max-slew / max-cap violations | 0 / 0 in every corner |
-| antenna | 1 net left after 16 diodes (precheck passes) |
+| antenna | 0 nets |
 
 ## Open questions
 
