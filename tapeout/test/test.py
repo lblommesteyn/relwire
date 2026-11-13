@@ -153,3 +153,58 @@ async def test_symmetry_roles_cycle(dut):
 @cocotb.test()
 async def test_usb_token_crc5_nobody_is_given(dut):
     await run_case(dut, case="usb_token")
+
+
+def keep_cores(stream, keep):
+    """The loader stream with the data and role-mask commands of every core
+    not in [keep] left out: a load that names fewer cores."""
+    out, i = [], 0
+    while i < len(stream):
+        c = list(stream[i : i + CMD_LEN[stream[i]]])
+        i += len(c)
+        if c[0] in (0x03, 0x04) and c[1] not in keep:
+            continue
+        out += c
+    return out
+
+
+@cocotb.test()
+async def test_reload_drops_old_roles(dut):
+    """Load I2C with a controller and a target, reload in the middle of the
+    transaction naming only the sniffer: the reload must stop the cores and
+    no core may keep a role from the first load, so nothing drives a pin."""
+    stream, ticks, _ = read_vectors()
+    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
+    dut.ena.value = 1
+    dut.ui_in.value = 0
+    dut.load_strobe.value = 0
+    dut.load_frame.value = 0
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 10)
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 4)
+    for b in stream:
+        await send(dut, b)
+    drove = False
+    for _ in range(200 * TICK_CYCLES):
+        await FallingEdge(dut.clk)
+        drove = drove or (int(dut.uio_oe.value) & 0xF) != 0
+    assert drove, "the first load should drive the bus"
+    assert int(dut.uo_out.value) & 0x80, "the first load should be running"
+
+    # reload mid-run: the frame reset alone must stop the cores
+    await FallingEdge(dut.clk)
+    dut.load_frame.value = 1
+    await ClockCycles(dut.clk, 4, rising=False)
+    dut.load_frame.value = 0
+    await ClockCycles(dut.clk, 4, rising=False)
+    assert not int(dut.uo_out.value) & 0x80, "a frame reset should stop the cores"
+    assert int(dut.uio_oe.value) & 0xF == 0, "a stopped chip drives nothing"
+
+    for b in keep_cores(stream, keep=(2,)):
+        await send(dut, b)
+    assert int(dut.uo_out.value) & 0x80, "the second load should be running"
+    for _ in range(ticks * TICK_CYCLES):
+        await FallingEdge(dut.clk)
+        assert int(dut.uio_oe.value) & 0xF == 0, "a core kept a role from the earlier load"
+    dut._log.info("reload: stopped on frame reset, no role survived, nothing driven")

@@ -2,13 +2,14 @@
 //
 // NC cores share one single-port program memory (128 x 26 flip-flops,
 // registered read) and one 8-entry constant table (the timing). The memory is
-// plain logic rather than an IHP SRAM macro: on CMOS5L the macro's Metal4
-// power pins cannot reach Tiny Tapeout's Metal4-only power grid without
-// TopMetal1, which user designs may not use. Every core runs the same binary; a 4-bit
+// plain logic rather than an IHP SRAM macro: in this design on CMOS5L we could
+// not connect the macro's Metal4 power pins to Tiny Tapeout's Metal4-only
+// power grid without TopMetal1. Every core runs the same binary; a 4-bit
 // role mask per core says which roles it plays.
 //
 // Protocol wires: uio[3:0]. Loader: byte on ui_in, strobe on uio_in[7]
-// (rising edge), frame reset on uio_in[6]. Status / readback on uo_out.
+// (rising edge), frame reset on uio_in[6]: it also stops the cores and clears
+// every role mask, so a new load starts from nothing. Status / readback on uo_out.
 //
 // Tick schedule (T = 5 + SYNC + EXEC*NC cycles): slot 0 commits the cores'
 // drives to the pins; the pins pass a SYNC-flop synchronizer (external
@@ -114,9 +115,14 @@ module tt_um_relwire #(
       ld_byte <= 0;
       ld_data <= 0;
     end else if (frm_s[1]) begin
+      // a frame reset starts a new configuration: stop the cores and drop
+      // every role, so no core keeps driving for an earlier program
       sram_we <= 1'b0;
       ld_we <= 1'b0;
       cnt <= 0;
+      run <= 0;
+      masks <= 0;
+      rb_mode <= 0;
     end else if (byte_in) begin
       sram_we <= 1'b0;
       ld_we <= 1'b0;
@@ -179,6 +185,7 @@ module tt_um_relwire #(
   reg [15:0] tick;
   reg [NW-1:0] now, prev;
   reg [NW-1:0] pin_oe, pin_out;
+  reg [NW-1:0] pin_cf, cnow, cprev;  // push-pull wire driven both ways by the cores
   wire cores_rst = !run;  // synchronous stop; run is 0 in reset
   reg [NW-1:0] sync_r[0:SYNC-1];
   integer si;
@@ -194,6 +201,8 @@ module tt_um_relwire #(
       tick <= 0;
       prev <= 0;
       now <= 0;
+      cnow <= 0;
+      cprev <= 0;
     end else if (cores_rst) begin
       slot <= 0;
       tick <= 0;
@@ -203,6 +212,9 @@ module tt_um_relwire #(
       if (slot == LATCH) begin
         prev <= (tick == 0) ? pins_in : now;
         now <= pins_in;
+        // the contention flag needs no synchronizer: it is the cores' own drive
+        cprev <= (tick == 0) ? pin_cf : cnow;
+        cnow <= pin_cf;
       end
     end
   end
@@ -241,7 +253,7 @@ module tt_um_relwire #(
       rpm_core #(.NW(NW)) u (
           .clk(clk), .rst_n(rst_ni), .rst(cores_rst), .pre_en(predecoding && pre_core == g),
           .exec_en(executing && exec_core == g),
-          .tick(tick), .now(now), .prev(prev), .res(res), .instr(ireg[26*g+:26]),
+          .tick(tick), .now(now), .prev(prev), .cnow(cnow), .cprev(cprev), .res(res), .instr(ireg[26*g+:26]),
           .role_mask(masks[4*g+:4]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
           .ev_valid(ev_valid[g]), .ev_code(ev_code[g]), .ev_addr(ev_addr[g]),
           .halted(halted[g]), .ksel_a(ksa[g]), .ksel_b(ksb[g]), .ka(ka[g]), .kb(kb[g]), .kp(kt[7]),
@@ -290,15 +302,24 @@ module tt_um_relwire #(
     if (!rst_ni) begin
       pin_oe <= 0;
       pin_out <= 0;
+      pin_cf <= 0;
     end else if (cores_rst) begin
       pin_oe <= 0;
       pin_out <= 0;
+      pin_cf <= 0;
     end else if (slot == 0) begin
       for (wp = 0; wp < NW; wp = wp + 1)
         case (wres[2*wp+:2])
-          2'd1: begin pin_oe[wp] <= any0[wp]; pin_out[wp] <= 1'b0; end
-          2'd2: begin pin_oe[wp] <= any1[wp]; pin_out[wp] <= 1'b1; end
-          default: begin pin_oe[wp] <= anyoe[wp]; pin_out[wp] <= any1[wp]; end
+          2'd1: begin pin_oe[wp] <= any0[wp]; pin_out[wp] <= 1'b0; pin_cf[wp] <= 1'b0; end
+          2'd2: begin pin_oe[wp] <= any1[wp]; pin_out[wp] <= 1'b1; pin_cf[wp] <= 1'b0; end
+          default: begin
+            // push-pull: two cores driving opposite levels is contention, and
+            // every core is told (cnow); the pin is released rather than
+            // giving either core the wire
+            pin_cf[wp] <= any0[wp] & any1[wp];
+            pin_oe[wp] <= anyoe[wp] & ~(any0[wp] & any1[wp]);
+            pin_out[wp] <= any1[wp];
+          end
         endcase
     end
   end

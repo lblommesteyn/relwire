@@ -20,7 +20,12 @@ let read_lines path =
   in
   go []
 
-let root = Filename.concat (Filename.get_temp_dir_name ()) "relwire_hw"
+(* RELWIRE_HW_DIR keeps the cases (dune gives a test its own temporary
+   directory, which goes away) for tapeout/collect_gl_cases.sh *)
+let root =
+  match Sys.getenv_opt "RELWIRE_HW_DIR" with
+  | Some d when d <> "" -> d
+  | _ -> Filename.concat (Filename.get_temp_dir_name ()) "relwire_hw"
 let run cmd = if Sys.command cmd <> 0 then failwith ("command failed: " ^ cmd)
 
 let first_diff a b =
@@ -168,6 +173,8 @@ let () =
     [ (Run_as [ "master" ], [ ("cmd", "11001100") ]); (Observe_all, []) ];
   scenario "ps2" (ex220 "ps2.rw") ~ticks:4800
     [ (Run_as [ "device" ], [ ("data", "01101000") ]); (Run_as [ "host" ], []); (Observe_all, []) ];
+  scenario "ps2_host" (ex220 "ps2_host.rw") ~ticks:7000
+    [ (Run_as [ "host" ], [ ("cmd", "10110111") ]); (Run_as [ "device" ], []); (Observe_all, []) ];
   (* checksums that start at all ones (a SETCRC instruction) and are sent complemented *)
   scenario "modbus" (ex220 "modbus.rw") ~ticks:12000
     [ (Run_as [ "master" ], [ ("addr", "10001000"); ("func", "11100000") ]);
@@ -177,6 +184,21 @@ let () =
     [ (Run_as [ "host" ], [ ("pid", "10000111"); ("addr", "1010100"); ("endp", "0111") ]);
       (Run_as [ "device" ], []);
       (Observe_all, []) ];
+  (* audit regressions: programs where the RTL and the model used to differ,
+     or agreed on a wrong execution *)
+  let ps = Rw_parse.program_of_string in
+  scenario "zero_repeat"
+    (ps "wire W push_pull pull_down lit x = 1 from tx protocol { repeat i 0 { put W x[0] after mark 5 sample W x[0] } after go 3 put W x[0] after m2 5 sample W x[0] }")
+    ~ticks:50 [ (Run_as [ "tx" ], []); (Observe_all, []) ];
+  scenario "shadowed_loop"
+    (ps "wire W push_pull pull_down field x[2] from tx protocol { repeat i 2 { repeat i 2 { put W x[i] after mark 5 sample W x[i] } } }")
+    ~ticks:100 [ (Run_as [ "tx" ], [ ("x", "01") ]); (Observe_all, []) ];
+  scenario "push_pull_contention"
+    (ps "wire W push_pull pull_down field x[1] from tx protocol { put W x[0] after mark 5 sample W x[0] }")
+    ~ticks:30 [ (Run_as [ "tx" ], [ ("x", "0") ]); (Run_as [ "tx" ], [ ("x", "1") ]); (Observe_all, []) ];
+  scenario "crc_branch"
+    (ps "wire W push_pull pull_down crc c[1] poly 1 init 1 from tx lit one = 1 from tx protocol { put W c[0] after gap 5 sample W c[0] if c[0] == 1 { put W one[0] after mark 5 sample W one[0] } }")
+    ~ticks:30 [ (Run_as [ "tx" ], []); (Observe_all, []) ];
   (* Random programs (the projection fuzzer's generator) through the RTL:
      every role as a core plus an observer, single issue, compiled to one
      shared binary; with and without a second controller in arbitration. *)

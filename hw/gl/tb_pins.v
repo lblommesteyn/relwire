@@ -22,7 +22,7 @@ module tb_pins;
       .uio_oe(uio_oe), .ena(1'b1), .clk(clk), .rst_n(rst_n));
 
   reg [7:0] stream[0:16383];
-  reg [1023:0] dir;
+  reg [8*1024-1:0] dir;  // up to 1024 characters of path
   integer cycles, nbytes, f, i, c, b;
 
   // Inputs change on the falling edge: changing them on the rising edge races
@@ -42,6 +42,12 @@ module tb_pins;
     if (!$value$plusargs("dir=%s", dir)) dir = ".";
     if (!$value$plusargs("cycles=%d", cycles)) cycles = 1000;
     if (!$value$plusargs("bytes=%d", nbytes)) nbytes = 0;
+    f = $fopen({dir, "/load.hex"}, "r");
+    if (f == 0) begin
+      $display("tb_pins: cannot open %0s/load.hex", dir);
+      $fatal(1);
+    end
+    $fclose(f);
     $readmemh({dir, "/cfg.hex"}, cfg);
     $readmemh({dir, "/load.hex"}, stream);
     f = $fopen({dir, "/pins.txt"}, "w");
