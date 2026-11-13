@@ -883,5 +883,37 @@ let () =
   check "and none when the window opens at 3, when the core gets there"
     (reaction_hazards (ps "wire W push_pull pull_down field x[1] from tx time rise from tx protocol { sample W x[0] sample W x[0] sample W x[0] edge W -> 1 @rise in [3,5] }") Observe_all = []);
 
+  print_endline "22. third review regressions";
+  (* the instructions before the first put are part of its time *)
+  let cp = ps "wire W push_pull pull_down wire Z push_pull pull_down field x[1] from tx lit one = 1 from tx protocol { sample W x[0] sample W x[0] sample W x[0] put W one[0] after t 10 put Z one[0] } constraint \"gap\": change W -> change Z >= 10" in
+  let cl = List.hd (certify ~issue:1 cp (Run_as [ "tx" ])) in
+  let a = make_agent ~issue:1 ~name:"tx" cp (Run_as [ "tx" ]) ~inputs:[ ("x", bits "0") ] in
+  let tr = simulate ~wires:cp.wires ~agents:[ a ] ~ticks:30 () in
+  let first w = fst (List.find (fun (_, vs) -> List.assoc_opt w vs = Some L1) tr) in
+  let actual = first "Z" - first "W" in
+  Printf.printf "  W->Z: simulated %d ticks, certificate guarantees %d\n" actual cl.guaranteed.lo;
+  check "the certificate's bound is the simulated separation (8), not 11"
+    (cl.guaranteed.lo = actual && actual = 8);
+  check "so the 10-tick requirement FAILS, as it does in the model and the RTL" (not cl.pass);
+  check "three samples and a put before an edge whose window opens at 1: a reaction hazard"
+    (reaction_hazards (ps "wire W push_pull pull_down wire Z push_pull pull_down field x[1] from tx lit one = 1 from tx time rise from rx protocol { sample W x[0] sample W x[0] sample W x[0] put Z one[0] edge W -> 1 @rise in [1,5] }") (Run_as [ "tx" ]) <> []);
+  (* numbers *)
+  check "4294967296 * 4294967296 is refused (it would wrap to 0)"
+    (rejects (fun () -> edge_prog "4294967296 * 4294967296"));
+  check "the number max_int is refused (it would read as inf)"
+    (rejects (fun () -> edge_prog (string_of_int max_int)));
+  check "a literal too large for an integer is a parse error, not a crash"
+    (rejects (fun () -> edge_prog "99999999999999999999999"));
+  check "if_run W 0 is refused (no samples is no test)"
+    (rejects (fun () -> specialize (ps "wire W push_pull pull_down field x[1] from tx protocol { sample W x[0] if_run W 0 { put W x[0] } }") Observe_all));
+  (* a maximum written in time units never becomes later than written *)
+  let rp = Rw_parse.program_of_string ~tick_ns:220 "const d = 500ns wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [d, d + 1us] }" in
+  check "at 220 ns a 500 ns minimum rounds up to 3 ticks, a 1500 ns maximum down to 6 (2 + 4)"
+    (match (specialize rp Observe_all).(0) with
+     | IEdge { min_after; max_after; _ } -> min_after = 3 && max_after = 6 | _ -> false);
+  let rp2 = Rw_parse.program_of_string ~tick_ns:220 "wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [1, 500ns] }" in
+  check "and a written 500 ns deadline is 2 ticks (440 ns), so an edge at 660 ns is late"
+    (match (specialize rp2 Observe_all).(0) with IEdge { max_after; _ } -> max_after = 2 | _ -> false);
+
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"

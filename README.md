@@ -147,10 +147,10 @@ us at 19200 baud, 0.5% slow and inside a UART's tolerance.
 |---|---|
 | semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation, eleven named CRCs against their published check values |
 | projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier, and every bound bit must agree across roles; 800 runs at 100 seeds in CI, 2,400 at 300 seeds with `dune exec ./test/fuzz.exe 300` |
-| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 17 protocol scenarios, 5 audit regressions and random programs, through the pin-level top and its loader |
+| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 17 protocol scenarios, 8 audit regressions and random programs, through the pin-level top and its loader |
 | symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. Six metamorphic runs, one swap and one 4-cycle per action (the generators of S4), on RTL and on the gate-level netlist. They test each generator on the I2C configuration; they are not a proof for all 13,824 relabellings, which would need the property at every intermediate configuration |
 | reload | `tapeout/test/test.py`: a reload in the middle of a transaction stops the cores, and no core keeps a role from the earlier load |
-| netlist vs RTL | `hw/gl/run_gl.sh`: the routed netlist against the RTL, every output pin on every cycle, for twelve programs chosen to cover each mechanism once (`tapeout/collect_gl_cases.sh`); runs in tt-relwire's CI as `gl_pins` |
+| netlist vs RTL | `hw/gl/run_gl.sh`: the routed netlist against the RTL, every output pin on every cycle, for thirteen programs chosen to cover each mechanism once (`tapeout/collect_gl_cases.sh`); runs in tt-relwire's CI as `gl_pins` |
 | checksum on the netlist | `tapeout/test/test.py`: a USB token whose CRC-5 nobody is given (start at all ones, sent complemented); the receiving cores must check it and bind `10111`, on RTL and gate level |
 | in CI | [tt-relwire](https://github.com/lblommesteyn/tt-relwire): Tiny Tapeout's GDS build, precheck, and cocotb tests on RTL and gate level |
 
@@ -278,9 +278,11 @@ Current result, with the audit fixes (CI on [tt-relwire](https://github.com/lblo
 ## External audit (November 2026)
 
 An independent review ran extra programs against the model and the RTL and
-found eleven problems that the existing tests passed over, and a second pass
-found two edge cases in the first fixes. All are fixed and each has a
-regression test (`test/test_spike.ml` section 21, the audit
+found eleven problems that the existing tests passed over; a second pass
+found two edge cases in the first fixes, and a third found six more,
+including a timing certificate that promised more than the chip does. All
+are fixed and each has a regression test (sections 21 and 22 of
+`test/test_spike.ml` for the third pass) (`test/test_spike.ml` section 21, the audit
 scenarios in `test/hw_diff.ml`, the reload test in `tapeout/test/test.py`):
 
 | finding | fix |
@@ -296,4 +298,10 @@ scenarios in `test/hw_diff.ml`, the reload test in `tapeout/test/test.py`):
 | two cores driving a push-pull wire to opposite levels gave the 1 the wire | the chip detects it, releases the pin and reports a bad wire to every core, as the model's Contention |
 | the symmetry tests were described as covering all 13,824 relabellings | reworded: six metamorphic checks of the generators |
 | long vector paths were truncated by the testbench, which then hung | 1,024-character paths, missing inputs are a fatal error, and a watchdog |
+| *third pass:* the certificate dropped the instructions before a program's first put, promising 11 ticks where the model and RTL give 8 | the put's offset from the program start counts, for certificates and reaction hazards |
+| an unbounded wait reported a valid edge as early once the 16-bit tick counter wrapped (after 14.4 ms) | each core counts ticks since its anchor in a saturating counter; tested with an edge at tick 65,537 from outside the chip |
+| a product could overflow to 0, and the number `max_int` read as `inf` | every literal and every intermediate result is below 2^40, with products checked before they are formed |
+| `sample W c[0] into c` on the checksum itself compiled as a data sample | compiled as a checksum sample |
+| `if_run W 0` skipped its body in the model and ran it in the RTL | a run of at least one sample is required |
+| a maximum written in time units rounded up, so a 500 ns deadline accepted an edge at 660 ns | maximums round down to whole ticks, minimums up |
 

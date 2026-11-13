@@ -57,6 +57,7 @@ module rpm_core #(
     input wire pre_en,  // predecode: the cycle before this core executes
     input wire exec_en,
     input wire [15:0] tick,
+    input wire tick_inc,  // the tick advances at the end of this cycle
     input wire [NW-1:0] now,
     input wire [NW-1:0] prev,
     input wire [NW-1:0] cnow,  // per wire: cores drove it both ways (push-pull) this tick
@@ -88,7 +89,12 @@ module rpm_core #(
 
   reg [3:0] demoted;
   reg [1:0] phase;
-  reg [15:0] anchor, t0;
+  // Ticks since the anchor, saturating: the tick counter wraps after 65536
+  // ticks (14.4 ms at 220 ns), and an unbounded wait must still know that its
+  // minimum has passed. Every finite table value is below 0xFFFF, so a
+  // saturated count compares like the true one.
+  reg [15:0] el;
+  reg [15:0] t0;
   reg [3*NW-1:0] run_len;  // 3 bits per wire
   reg [NW-1:0] last;
   reg lactive;
@@ -113,7 +119,7 @@ module rpm_core #(
   wire [15:0] k_hi = ka, k_lo = kb;
   wire [15:0] tg_nom = ka, tg_min = ka, tg_max = kb;
 
-  wire [15:0] d = tick - anchor;
+  wire [15:0] d = el;
   wire bus = now[w];
   wire rose = now[w] != prev[w];
   // the data bit an instruction works with: data memory, or the checksum's top bit
@@ -181,7 +187,7 @@ module rpm_core #(
 
   task finish;
     begin
-      anchor <= tick;
+      el <= {15'd0, tick_inc};  // 0 now, 1 once the tick advances
       phase <= READY;
       goto(pc + 1'b1);
     end
@@ -221,7 +227,7 @@ module rpm_core #(
       halted <= 0;
       demoted <= 4'd0;
       phase <= READY;
-      anchor <= 0;
+      el <= 0;
       t0 <= 0;
       last <= 0;
       lactive <= 0;
@@ -244,6 +250,8 @@ module rpm_core #(
     end else begin
       ev_valid <= 1'b0;
       if (ld_we) dmem[8*ld_byte+:8] <= ld_data;
+      // count the tick; an anchor set in this cycle (below) overrides it
+      if (!rst && tick_inc && el != 16'hFFFF) el <= el + 1'b1;
       if (rst) clear;
       else if (exec_en && !halted) begin
         case (op)
@@ -277,7 +285,7 @@ module rpm_core #(
           end
           4'd4: begin  // AFTER
             if (p_ge_a) begin
-              anchor <= tick;
+              el <= {15'd0, tick_inc};
               goto(pc + 1'b1);
             end
           end

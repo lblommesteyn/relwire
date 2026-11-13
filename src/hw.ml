@@ -151,6 +151,9 @@ let compile prog =
           [ hdr 3 (own_of (owner_of prog field)) (w wire) crc_inv lor mem true ix ad
             lor (1 lsl 6) lor (1 lsl 5) ]
         else [ hdr 3 (own_of (owner_of prog field)) (w wire) false lor mem (is_lit field) ix ad ]
+    | Sample_into { wire; field; idx; _ } when is_crc field ->
+        (* folding the checksum into itself is just sampling it *)
+        one ~hw env lv (Sample { wire; field; idx })
     | Sample_into { wire; field; idx; _ } ->
         let ad, ix = resolve env lv field idx in
         [ hdr 3 (own_of (owner_of prog field)) (w wire) false lor mem (is_lit field) ix ad
