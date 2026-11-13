@@ -46,6 +46,11 @@ let drive_for spec lv =
 (* ---------- source language ---------- *)
 
 type role = string
+
+(* The unbounded maximum of a window. No finite value can equal it: the parser
+   produces it only for the keyword [inf] and refuses arithmetic on it. *)
+let inf = max_int
+
 type index = Const of int | Loop of string
 
 type decl =
@@ -183,7 +188,7 @@ let validate prog =
     prog.decls;
   let window what lo hi =
     if lo < 0 || hi < lo then failwith (Printf.sprintf "%s: window [%d, %d] is not 0 <= min <= max" what lo hi);
-    if hi > 1_000_000 then failwith (Printf.sprintf "%s: %d ticks is past inf (1000000)" what hi)
+    if lo = inf then failwith (what ^ ": the minimum cannot be inf")
   in
   let rec st = function
     | Edge { time; min_after; max_after; _ } -> window ("edge @" ^ time) min_after max_after
@@ -191,7 +196,7 @@ let validate prog =
         window ("toggle @" ^ time) min_after max_after;
         if nominal < 0 then failwith ("toggle @" ^ time ^ ": negative nominal time")
     | After { time; ticks } ->
-        if ticks < 0 || ticks >= 1_000_000 then failwith (Printf.sprintf "after %s: a delay of %d ticks" time ticks)
+        if ticks < 0 || ticks = inf then failwith (Printf.sprintf "after %s: a delay must be finite and nonnegative" time)
     | Repeat { var; count; body } ->
         if count < 0 then failwith (Printf.sprintf "repeat %s %d: negative count" var count);
         List.iter st body
@@ -397,7 +402,7 @@ let log a tick outcome var bit = a.events <- { tick; outcome; var; bit } :: a.ev
 let effective a role own =
   if own = Supplied && List.mem role a.demoted then Observed else own
 
-let scaled a n = if n >= 1_000_000 then n else int_of_float (Float.round (float n /. a.clock))
+let scaled a n = if n = inf then n else int_of_float (Float.round (float n /. a.clock))
 
 let release_all a = Hashtbl.filter_map_inplace (fun _ _ -> Some HighZ) a.drives
 
@@ -797,7 +802,7 @@ let event_time ev anchor (klo, khi) =
   | KDrive { wait; lat; recessive } ->
       let lo = max klo wait + lat in
       (add anchor { lo; hi = (if recessive then None else Some (max khi wait + lat)) }, true)
-  | KWatch { lo; hi } -> (add anchor { lo; hi = Some hi }, true)
+  | KWatch { lo; hi } -> (add anchor { lo; hi = (if hi = inf then None else Some hi) }, true)
   | KTimer t -> (add anchor { lo = max klo t; hi = Some (max khi t) }, true)
 
 let certify ?(io = ideal_io) ?issue prog assignment =

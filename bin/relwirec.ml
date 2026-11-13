@@ -17,7 +17,7 @@ let usage () =
 
 let lvl = function L0 -> "0" | L1 -> "1"
 let own = function Supplied -> "drive " | Observed -> "watch "
-let hi n = if n >= 1_000_000 then "inf" else string_of_int n
+let hi n = if n = Relwire.inf then "inf" else string_of_int n
 
 let pp_instr = function
   | IEdge { wire; level; time; own = o; min_after; max_after; _ } ->

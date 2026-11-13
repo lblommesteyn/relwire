@@ -832,8 +832,25 @@ let () =
     ((Hw.compile (ps "wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [1,inf] }")).consts |> Array.mem 0xFFFF);
   check "65534 ticks, the largest finite value, still compiles"
     ((Hw.compile (ps "wire W push_pull pull_down lit x = 1 from tx protocol { after d 65534 put W x[0] }")).consts.(0) = 65534);
-  check "a time literal of 1000000 ticks or more is refused (that is how inf is spelt)"
-    (rejects (fun () -> ps ~tick_ns:1 "const t = 2ms wire W push_pull pull_down lit x = 1 from tx protocol { after d t put W x[0] }"));
+  (* inf is its own value: no finite number or expression can become it *)
+  let edge_prog w = ps ("wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [1," ^ w ^ "] }") in
+  check "[1, 1000000] is finite in the model (not inf)"
+    (match (specialize (edge_prog "1000000") Observe_all).(0) with
+     | IEdge { max_after; _ } -> max_after = 1_000_000 && max_after <> inf | _ -> false);
+  check "and refused by the compiler, rather than becoming the unbounded sentinel"
+    (rejects (fun () -> Hw.compile (edge_prog "1000000")));
+  check "[1, 500000+500000] likewise"
+    (rejects (fun () -> Hw.compile (edge_prog "500000+500000")));
+  check "a finite time literal of 2 ms at a 1 ns tick is finite, and refused by the compiler"
+    (rejects (fun () -> Hw.compile (ps ~tick_ns:1 "const t = 2ms wire W push_pull pull_down lit x = 1 from tx protocol { after d t put W x[0] }")));
+  check "arithmetic on inf is a parse error (inf+1, inf-1, 2*inf)"
+    (List.for_all (fun w -> rejects (fun () -> edge_prog w)) [ "inf+1"; "inf-1"; "2*inf" ]);
+  check "after inf is refused (a delay is finite)"
+    (rejects (fun () -> specialize (ps "wire W push_pull pull_down lit x = 1 from tx protocol { after d inf put W x[0] }") Observe_all));
+  (* only the outermost repeat is the hardware loop, however deep the nesting *)
+  let nest = ps "wire W push_pull pull_down field x[2] from tx protocol { repeat i 2 { repeat i 2 { repeat j 2 { put W x[j] after m 5 sample W x[j] } } } }" in
+  let loops = Array.fold_left (fun n w -> if (w lsr 20) land 15 = 9 then n + 1 else n) 0 (Hw.compile nest).words in
+  check "repeat i { repeat i { repeat j } }: one LOOP, the inner two unrolled" (loops = 1);
   check "a tick of 0 ns is refused" (rejects (fun () -> ps ~tick_ns:0 "wire W push_pull pull_down lit x = 1 from tx protocol { put W x[0] }"));
   (* inputs that would alias hardware resources *)
   check "a fifth wire is refused (the chip has four)"
