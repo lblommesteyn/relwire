@@ -6,7 +6,7 @@ open Relwire
 
 let seg1 = 75
 let seg2 = 25
-let forever = 1_000_000
+let forever = Relwire.inf
 
 let wires = [ { name = "CAN"; resolution = DominantLow; bias = PullUp } ]
 

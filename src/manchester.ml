@@ -4,7 +4,7 @@
 open Relwire
 
 let half = 50
-let forever = 1_000_000
+let forever = Relwire.inf
 
 let wires = [ { name = "LINE"; resolution = PushPull; bias = PullUp } ]
 

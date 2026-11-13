@@ -147,7 +147,7 @@ us at 19200 baud, 0.5% slow and inside a UART's tolerance.
 |---|---|
 | semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation, eleven named CRCs against their published check values |
 | projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier, and every bound bit must agree across roles; 800 runs at 100 seeds in CI, 2,400 at 300 seeds with `dune exec ./test/fuzz.exe 300` |
-| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 17 protocol scenarios, 4 audit regressions and random programs, through the pin-level top and its loader |
+| RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 17 protocol scenarios, 5 audit regressions and random programs, through the pin-level top and its loader |
 | symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. Six metamorphic runs, one swap and one 4-cycle per action (the generators of S4), on RTL and on the gate-level netlist. They test each generator on the I2C configuration; they are not a proof for all 13,824 relabellings, which would need the property at every intermediate configuration |
 | reload | `tapeout/test/test.py`: a reload in the middle of a transaction stops the cores, and no core keeps a role from the earlier load |
 | netlist vs RTL | `hw/gl/run_gl.sh`: the routed netlist against the RTL, every output pin on every cycle, for twelve programs chosen to cover each mechanism once (`tapeout/collect_gl_cases.sh`); runs in tt-relwire's CI as `gl_pins` |
@@ -278,17 +278,18 @@ Current result, with the audit fixes (CI on [tt-relwire](https://github.com/lblo
 ## External audit (November 2026)
 
 An independent review ran extra programs against the model and the RTL and
-found eleven problems that the existing tests passed over. All are fixed and
-each has a regression test (`test/test_spike.ml` section 21, the audit
+found eleven problems that the existing tests passed over, and a second pass
+found two edge cases in the first fixes. All are fixed and each has a
+regression test (`test/test_spike.ml` section 21, the audit
 scenarios in `test/hw_diff.ml`, the reload test in `tapeout/test/test.py`):
 
 | finding | fix |
 |---|---|
 | a branch on a sampled checksum bit went different ways in sender and observer (model and RTL agreed on the wrong run) | every role keeps the wire's level of a checksum bit; branches on literals are refused |
-| timing values of 65,535 ticks or more were shortened to 65,535 after certification, and a finite maximum became "unbounded" | refused at compile time; `inf` is the only unbounded value; a finite time of 1,000,000 ticks or more is refused by the parser |
+| timing values of 65,535 ticks or more were shortened to 65,535 after certification, and a finite maximum became "unbounded" | refused at compile time. `inf` is its own value, which only the keyword produces: arithmetic on it is a parse error, so no finite number or expression (`1000000`, `500000+500000`) can become unbounded |
 | a reload left omitted cores with their old roles, and the frame reset did not stop a running chip | the frame reset now stops the cores and clears every role mask; the host library also sends STOP |
 | `repeat i 0` ran its body once in hardware | zero-count loops are removed in the model and the compiler |
-| a nested `repeat i` that reused the name read the outer index | the inner binding shadows the hardware loop variable |
+| a nested `repeat i` that reused the name read the outer index | the inner binding shadows the hardware loop variable; only the outermost repeat is the hardware loop, however deep the nesting (a follow-up review found a third level reused it) |
 | a fifth wire and out-of-range field indices were accepted and aliased other resources | one validation boundary: wire count, index bounds, unique names, widths, ordered windows, nonnegative counts and a positive tick |
 | an edge arriving on the first tick after its deadline was accepted | the deadline is checked first, in the model and the RTL, as for data edges |
 | reaction-hazard analysis ignored the instructions before the first timed event | the schedule has an entry node |
