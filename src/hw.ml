@@ -90,7 +90,7 @@ let compile prog =
      it: a longer one is refused, not shortened (the certificate is of the
      source values) *)
   let clamp v =
-    if v >= 1_000_000 then inf
+    if v = Relwire.inf then inf
     else if v >= inf then
       failwith
         (Printf.sprintf "a timing value of %d ticks does not fit the 16-bit table (at most %d): use a longer tick"
@@ -123,9 +123,10 @@ let compile prog =
     let o = match owner with Some r -> (r lsl 24) lor (1 lsl 19) | None -> 0 | _ -> 0 in
     o lor (op lsl 20) lor (wire lsl 17) lor (Bool.to_int lvl lsl 16)
   in
-  (* env: unrolled loop variables; lv: the hardware loop variable, if any.
+  (* env: unrolled loop variables; lv: the name bound to the hardware loop's
+     index, if any; hw: inside the hardware loop (so deeper repeats unroll).
      An unrolled repeat that reuses lv's name shadows it: [one] drops lv for
-     its body, so the inner binding is the one found here. *)
+     its body but stays inside the hardware loop. *)
   let resolve env lv field idx =
     match idx with
     | Const n -> (base field + n, false)
@@ -133,8 +134,8 @@ let compile prog =
     | Loop v -> (base field + List.assoc v env, false)
   in
   let mem lit ix ad = (Bool.to_int lit lsl 15) lor (Bool.to_int ix lsl 14) lor (ad lsl 7) in
-  let rec go env lv stmts = List.concat_map (one env lv) stmts
-  and one env lv = function
+  let rec go ?(hw = false) env lv stmts = List.concat_map (one ~hw env lv) stmts
+  and one ~hw env lv = function
     | Edge { wire; level; time; min_after; max_after } ->
         [ hdr 1 (own_of (owner_of prog time)) (w wire) (level = L1)
           lor (k min_after lsl 13) lor (k max_after lsl 10) ]
@@ -161,22 +162,22 @@ let compile prog =
         if kk > 5 then failwith "toggle constant triple does not fit";
         [ hdr 5 (own_of (owner_of prog field)) (w wire) false lor mem false ix ad lor kk ]
     | Repeat { count = 0; _ } -> []  (* as the model: no iterations, no LOOP *)
-    | Repeat { var; count; body } when lv = None ->
-        let b = go env (Some var) body in
+    | Repeat { var; count; body } when not hw ->
+        let b = go ~hw:true env (Some var) body in
         if count > 255 || List.length b > 255 then failwith "loop too large";
         if b = [] then [] else (hdr 9 None 0 false lor (count lsl 8) lor List.length b) :: b
     | Repeat { var; count; body } ->
         let lv = if lv = Some var then None else lv in
-        List.concat (List.init count (fun i -> go ((var, i) :: env) lv body))
+        List.concat (List.init count (fun i -> go ~hw ((var, i) :: env) lv body))
     | If_run { wire; n; set; body } ->
-        let b = go env lv body in
+        let b = go ~hw env lv body in
         if List.length b > 31 || n > 7 then failwith "if_run body too large";
         let set_bits = match set with
           | Some f -> (1 lsl 12) lor (base f lsl 5) | None -> 0 in
         (hdr 6 None (w wire) false lor (n lsl 13) lor set_bits lor List.length b) :: b
     | If_bit { field; idx; level; then_; else_ } ->
         let ad, ix = resolve env lv field idx in
-        let t = go env lv then_ and e = go env lv else_ in
+        let t = go ~hw env lv then_ and e = go ~hw env lv else_ in
         if e = [] then (hdr 7 None 0 (level = L1) lor mem false ix ad lor List.length t) :: t
         else
           ((hdr 7 None 0 (level = L1) lor mem false ix ad lor (List.length t + 1)) :: t)

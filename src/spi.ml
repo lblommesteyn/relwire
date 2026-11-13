@@ -3,7 +3,7 @@
 open Relwire
 
 let half = 25 (* 1 MHz SCLK at 50 MHz *)
-let forever = 1_000_000
+let forever = Relwire.inf
 
 let wires =
   [ { name = "CS"; resolution = PushPull; bias = PullUp };
