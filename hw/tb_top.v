@@ -22,7 +22,7 @@ module tb_top;
       .uio_oe(uio_oe), .ena(1'b1), .clk(clk), .rst_n(rst_n));
 
   reg [7:0] stream[0:16383];
-  reg [1023:0] dir;
+  reg [8*1024-1:0] dir;  // up to 1024 characters of path
   integer ticks, nwires, nbytes, ft, fe, fd, i, c;
 
   task send(input [7:0] b);
@@ -44,7 +44,8 @@ module tb_top;
       if (dut.slot == dut.CAPTURE && dut.tick < ticks) begin
         $fwrite(ft, "%0d ", dut.tick);
         for (w = 0; w < nwires; w = w + 1)
-          if (!uio_oe[w] && cfg[w][5]) $fwrite(ft, "x");  // undriven, floating
+          if (dut.cnow[w]) $fwrite(ft, "x");  // cores drove it both ways
+          else if (!uio_oe[w] && cfg[w][5]) $fwrite(ft, "x");  // undriven, floating
           else $fwrite(ft, "%b", dut.now[w]);
         $fwrite(ft, "\n");
       end
@@ -61,6 +62,20 @@ module tb_top;
     if (!$value$plusargs("ticks=%d", ticks)) ticks = 1000;
     if (!$value$plusargs("wires=%d", nwires)) nwires = NW;
     if (!$value$plusargs("bytes=%d", nbytes)) nbytes = 0;
+    // a missing input would otherwise leave the chip unprogrammed and the
+    // wait below hanging
+    fd = $fopen({dir, "/load.hex"}, "r");
+    if (fd == 0) begin
+      $display("tb_top: cannot open %0s/load.hex", dir);
+      $fatal(1);
+    end
+    $fclose(fd);
+    fd = $fopen({dir, "/cfg.hex"}, "r");
+    if (fd == 0) begin
+      $display("tb_top: cannot open %0s/cfg.hex", dir);
+      $fatal(1);
+    end
+    $fclose(fd);
     $readmemh({dir, "/cfg.hex"}, cfg);
     $readmemh({dir, "/load.hex"}, stream);
     ft = $fopen({dir, "/trace_hw.txt"}, "w");
@@ -69,7 +84,14 @@ module tb_top;
     rst_n = 1;
     repeat (4) @(posedge clk);
     for (i = 0; i < nbytes; i = i + 1) send(stream[i]);  // ends with 06 (run)
-    wait (dut.tick == ticks);
+    fork : run_or_time_out
+      wait (dut.tick == ticks) disable run_or_time_out;
+      begin
+        repeat (ticks * dut.T + 1000) @(posedge clk);
+        $display("tb_top: tick %0d not reached (is the chip running?)", ticks);
+        $fatal(1);
+      end
+    join
     @(posedge clk);
     #0.1;
     $fclose(ft);

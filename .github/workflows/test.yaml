@@ -26,6 +26,8 @@ jobs:
       # semantics (test_spike), projections (fuzz), RTL vs reference model (hw_diff)
       - name: Test
         run: dune test --force 2>&1 | tee test.log
+        env:
+          RELWIRE_HW_DIR: ${{ github.workspace }}/hw_cases
 
       # the Tiny Tapeout cocotb vectors, as tapeout/export_tt_repo.sh makes them
       - name: Generate the gate-level test vectors
@@ -34,6 +36,23 @@ jobs:
           dune exec ./tools/gen_tt_test.exe tt_vectors
           rm -f tt_vectors/cfg.hex tt_vectors/usb_token/cfg.hex
           find tt_vectors -type f | sort
+
+      # RTL-vs-netlist pin cases for tt-relwire's gl_pins job
+      - name: Collect the pin-level netlist cases
+        run: |
+          tapeout/collect_gl_cases.sh tt_vectors/gl_pins "$GITHUB_WORKSPACE/hw_cases"
+          cp hw/gl/tb_pins.v hw/gl/run_gl.sh tt_vectors/gl_pins/
+
+      # the demo-board library: the committed demo image is what relwirec emits,
+      # and the stream relwire_tt.py builds is byte for byte the cocotb stream
+      - name: Host library against the toolchain
+        run: |
+          dune exec relwirec -- examples/i2c_ns.rw --tick-ns 1000 --emit-image /tmp/i2c_image.py
+          diff /tmp/i2c_image.py host/i2c_image.py
+          # the cocotb vectors are i2c.rw (= I2c.write_transaction), so the
+          # stream check uses that program's image
+          dune exec relwirec -- examples/i2c.rw --emit-image /tmp/i2c_ref_image.py
+          python3 host/test_host.py /tmp/i2c_ref_image.py tt_vectors
 
       - name: Upload test vectors
         uses: actions/upload-artifact@v7

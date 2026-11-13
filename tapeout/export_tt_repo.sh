@@ -18,6 +18,11 @@ cp "$HERE/workflows/"*.yaml "$DEST/.github/workflows/"
 cp "$ROOT/LICENSE" "$DEST/"
 (cd "$ROOT" && dune exec ./tools/gen_tt_test.exe "$DEST/test" >/dev/null)
 rm -f "$DEST/test/cfg.hex" "$DEST/test/usb_token/cfg.hex"
+# RTL vs the routed netlist on every pin, every cycle (gds.yaml, gl_pins)
+HWDIR=$(mktemp -d)
+(cd "$ROOT" && RELWIRE_HW_DIR=$HWDIR dune test --force >/dev/null)
+"$HERE/collect_gl_cases.sh" "$DEST/test/gl_pins" "$HWDIR" >/dev/null
+cp "$ROOT/hw/gl/tb_pins.v" "$ROOT/hw/gl/run_gl.sh" "$DEST/test/gl_pins/"
 cat > "$DEST/.gitignore" <<'GI'
 runs/
 tt_submission/
@@ -27,7 +32,9 @@ test/*.fst
 test/__pycache__/
 test/gate_level_netlist.v
 GI
-cat > "$DEST/README.md" <<'MD'
+REV=$(git -C "$ROOT" rev-parse HEAD)
+echo "$REV" > "$DEST/SOURCE_REV"
+cat > "$DEST/README.md" <<MD
 # RelWire protocol emulator (Tiny Tapeout, IHP CMOS5L)
 
 Tiny Tapeout submission for the Jane Street protocol-emulator ASIC competition.
@@ -36,8 +43,10 @@ same binary a controller, a target or a sniffer.
 
 This repository is generated from the main project,
 [lblommesteyn/relwire](https://github.com/lblommesteyn/relwire), by
-`tapeout/export_tt_repo.sh`: the language, reference model, compiler, timing
-certificates and the full test suites live there. See [docs/info.md](docs/info.md)
+\`tapeout/export_tt_repo.sh\`, at commit
+[\`${REV:0:12}\`](https://github.com/lblommesteyn/relwire/tree/$REV) (also in
+\`SOURCE_REV\`): the language, reference model, compiler, timing certificates
+and the full test suites live there. See [docs/info.md](docs/info.md)
 for how the chip works and how to test it.
 MD
 echo "exported to $DEST"

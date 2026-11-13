@@ -37,6 +37,50 @@ jobs:
       - name: GL test
         uses: TinyTapeout/tt-gds-action/gl_test@ttihp27a
 
+  # The routed netlist against the RTL, every output pin on every cycle, for
+  # ten programs (test/gl_pins/cases.txt). Stronger than the cocotb gate-level
+  # test, which compares data memory at the end.
+  gl_pins:
+    needs: gds
+    runs-on: ubuntu-24.04
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v6
+
+      - name: Download GDS artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: tt_submission
+
+      - name: PDK version
+        working-directory: tt_submission
+        run: |
+          echo "PDK=$(jq -r '.PDK' pdk.json)" >> $GITHUB_ENV
+          echo "PDK_VERSION=$(jq -r '.PDK_VERSION' pdk.json)" >> $GITHUB_ENV
+          echo "PDK_ROOT=/home/runner/pdk" >> $GITHUB_ENV
+
+      - name: Install the PDK
+        uses: TinyTapeout/ciel-action@v1
+        with:
+          pdk_name: ${{ env.PDK }}
+          pdk_version: ${{ env.PDK_VERSION }}
+          pdk_root: ${{ env.PDK_ROOT }}
+
+      - name: Install iverilog
+        run: |
+          wget -q https://github.com/TinyTapeout/iverilog/releases/download/v13.0/iverilog_13.0-1_amd64.deb
+          sudo apt-get update -y
+          sudo apt-get install -y ./iverilog_13.0-1_amd64.deb
+
+      - name: RTL vs netlist, pin for pin
+        run: |
+          NET=$(ls tt_submission/*.v | head -1)
+          export RTL="$PWD/src/tt_um_relwire.v $PWD/src/rpm_core.v"
+          cd test/gl_pins
+          while read -r name bytes cycles; do
+            bash run_gl.sh "$PWD/../../$NET" "cases/$name" "$bytes" "$cycles"
+          done < cases.txt
+
   viewer:
     needs: gds
     runs-on: ubuntu-24.04
