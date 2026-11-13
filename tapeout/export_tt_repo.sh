@@ -18,6 +18,10 @@ cp "$HERE/workflows/"*.yaml "$DEST/.github/workflows/"
 cp "$ROOT/LICENSE" "$DEST/"
 (cd "$ROOT" && dune exec ./tools/gen_tt_test.exe "$DEST/test" >/dev/null)
 rm -f "$DEST/test/cfg.hex" "$DEST/test/usb_token/cfg.hex"
+# RTL vs the routed netlist on every pin, every cycle (gds.yaml, gl_pins)
+(cd "$ROOT" && dune test --force >/dev/null)
+"$HERE/collect_gl_cases.sh" "$DEST/test/gl_pins" >/dev/null
+cp "$ROOT/hw/gl/tb_pins.v" "$ROOT/hw/gl/run_gl.sh" "$DEST/test/gl_pins/"
 cat > "$DEST/.gitignore" <<'GI'
 runs/
 tt_submission/

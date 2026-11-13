@@ -7,7 +7,7 @@ reconstructs the whole transaction. All three share the chip's uio[1:0]
 pins, with the RP2's pull-ups as the bus pull-ups.
 
 Copy to the board with relwire_tt.py and i2c_image.py, then:  import demo_i2c
-The image must be compiled for the tick this clock gives (10 cycles/tick):
+The image must be compiled for the tick this clock gives (11 cycles/tick):
   relwirec examples/i2c_ns.rw --tick-ns 1000 --emit-image host/i2c_image.py
 """
 from ttboard.demoboard import DemoBoard
@@ -15,7 +15,7 @@ from ttboard.mode import RPMode
 import i2c_image as img
 from relwire_tt import Core, RelWireChip, TTBoardPort
 
-CLOCK_HZ = 10_000_000  # 1 us tick: I2C at about 70 kHz, gentle on pull-ups
+CLOCK_HZ = 11_000_000  # 11 cycles per tick: a 1 us tick, I2C at about 70 kHz
 
 tt = DemoBoard.get()
 tt.shuttle.tt_um_relwire.enable()

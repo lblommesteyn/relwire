@@ -485,6 +485,28 @@ let () =
     (field_value ph2 "data" = "01100000"
      && List.exists (fun e -> e.var = "par") (outcomes ph2 Mismatch));
 
+  let pk = ex220 "ps2_host.rw" in
+  let pk_run cmd =
+    let h = make_agent ~name:"H" pk (Run_as [ "host" ]) ~inputs:[ ("cmd", bits cmd) ]
+    and d = make_agent ~name:"D" pk (Run_as [ "device" ]) ~inputs:[]
+    and o = observer_of pk "O" in
+    ignore (simulate ~wires:pk.wires ~agents:[ h; d; o ] ~ticks:7000 ());
+    (h, d, o)
+  in
+  (* 0xED (Set LEDs), LSB first: six ones, so the parity bit is 1 *)
+  let kh, kd, ko = pk_run "10110111" in
+  let _, kd1, _ = pk_run "00101111" in   (* 0xF4: five ones, parity 0 *)
+  check "PS/2 host to device: the device reads the command and an odd parity nobody was given"
+    (List.for_all (fun x -> field_value x "cmd" = "10110111" && field_value x "par" = "1") [ kd; ko ]
+     && field_value kd1 "par" = "0");
+  check "PS/2 host to device: clock ownership passes to the device; it ACKs; all finished"
+    (List.for_all (fun x -> outcomes x Mismatch = [] && clean x && done_ x) [ kh; kd; ko; kd1 ]
+     && field_value kh "ack" = "0");
+  let lone_host = make_agent ~name:"H" pk (Run_as [ "host" ]) ~inputs:[ ("cmd", bits "10110111") ] in
+  ignore (simulate ~wires:pk.wires ~agents:[ lone_host ] ~ticks:48000 ());
+  check "PS/2 host to device: with no device, the host reports the clock that never came"
+    (List.exists (fun e -> e.var = "first") (outcomes lone_host Deadline_missed));
+
   print_endline "15d. checksums that start at all ones or are sent complemented";
   (* The reference model against the published check values: the checksum of
      the nine characters "123456789", each named CRC with its own polynomial,
@@ -595,22 +617,36 @@ let () =
 
   print_endline "15e. timing certificates for the protocols added as programs (220 ns tick, single issue)";
   List.iter
-    (fun (file, owner) ->
+    (fun (file, owners) ->
       let p = ex220 file in
-      let c = certify ~issue:1 p (Run_as [ owner ]) in
-      print_certificate ~tick_ns:220 (Printf.sprintf "  %s, role %s" file owner) c;
-      check (Printf.sprintf "%s: every constraint holds on every path (%d)" file (List.length c))
-        (c <> [] && List.for_all (fun l -> l.pass) c
+      (* each constraint is certified for the role that owns its times *)
+      let certs =
+        List.map
+          (fun owner ->
+            let c = certify ~issue:1 p (Run_as [ owner ]) in
+            print_certificate ~tick_ns:220 (Printf.sprintf "  %s, role %s" file owner) c;
+            c)
+          owners
+      in
+      let ok l =
+        l.pass
+        && match l.constr.spec_ns with Some ns -> l.guaranteed.lo * 220 >= ns | None -> true
+      in
+      check
+        (Printf.sprintf "%s: every constraint holds on every path (%d)" file
+           (List.length p.constraints))
+        (p.constraints <> []
          && List.for_all
-              (fun l -> match l.constr.spec_ns with
-                 | Some ns -> l.guaranteed.lo * 220 >= ns | None -> true)
-              c);
+              (fun (c : constr) ->
+                List.exists (List.exists (fun l -> l.constr.cname = c.cname && ok l)) certs)
+              p.constraints);
       let hz =
         List.concat_map (fun r -> reaction_hazards p (Run_as [ r ])) (Rw_parse.roles p @ [ "nobody" ])
       in
       check (Printf.sprintf "%s: no reaction hazards in any role" file) (hz = []))
-    [ ("jtag.rw", "probe"); ("onewire.rw", "master"); ("ps2.rw", "device");
-      ("modbus.rw", "master"); ("usb_token.rw", "host") ];
+    [ ("jtag.rw", [ "probe" ]); ("onewire.rw", [ "master" ]); ("ps2.rw", [ "device" ]);
+      ("ps2_host.rw", [ "host"; "device" ]); ("modbus.rw", [ "master" ]);
+      ("usb_token.rw", [ "host" ]) ];
 
   print_endline "16. branch lint and I2C read-or-write";
   let early =

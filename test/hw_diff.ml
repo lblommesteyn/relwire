@@ -168,6 +168,8 @@ let () =
     [ (Run_as [ "master" ], [ ("cmd", "11001100") ]); (Observe_all, []) ];
   scenario "ps2" (ex220 "ps2.rw") ~ticks:4800
     [ (Run_as [ "device" ], [ ("data", "01101000") ]); (Run_as [ "host" ], []); (Observe_all, []) ];
+  scenario "ps2_host" (ex220 "ps2_host.rw") ~ticks:7000
+    [ (Run_as [ "host" ], [ ("cmd", "10110111") ]); (Run_as [ "device" ], []); (Observe_all, []) ];
   (* checksums that start at all ones (a SETCRC instruction) and are sent complemented *)
   scenario "modbus" (ex220 "modbus.rw") ~ticks:12000
     [ (Run_as [ "master" ], [ ("addr", "10001000"); ("func", "11100000") ]);
