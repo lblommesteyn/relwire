@@ -51,6 +51,10 @@ type role = string
    produces it only for the keyword [inf] and refuses arithmetic on it. *)
 let inf = max_int
 
+(* Every finite number in a program is below this, so finite arithmetic
+   cannot overflow or reach [inf]. *)
+let max_finite = 1 lsl 40
+
 type index = Const of int | Loop of string
 
 type decl =
@@ -188,19 +192,24 @@ let validate prog =
     prog.decls;
   let window what lo hi =
     if lo < 0 || hi < lo then failwith (Printf.sprintf "%s: window [%d, %d] is not 0 <= min <= max" what lo hi);
-    if lo = inf then failwith (what ^ ": the minimum cannot be inf")
+    if lo >= max_finite then failwith (what ^ ": the minimum must be finite");
+    if hi <> inf && hi >= max_finite then failwith (Printf.sprintf "%s: maximum %d is too large" what hi)
   in
   let rec st = function
     | Edge { time; min_after; max_after; _ } -> window ("edge @" ^ time) min_after max_after
     | Toggle { time; nominal; min_after; max_after; _ } ->
         window ("toggle @" ^ time) min_after max_after;
-        if nominal < 0 then failwith ("toggle @" ^ time ^ ": negative nominal time")
+        if nominal < 0 || nominal >= max_finite then failwith ("toggle @" ^ time ^ ": nominal time out of range")
     | After { time; ticks } ->
-        if ticks < 0 || ticks = inf then failwith (Printf.sprintf "after %s: a delay must be finite and nonnegative" time)
+        if ticks < 0 || ticks >= max_finite then failwith (Printf.sprintf "after %s: a delay must be finite and nonnegative" time)
     | Repeat { var; count; body } ->
         if count < 0 then failwith (Printf.sprintf "repeat %s %d: negative count" var count);
         List.iter st body
-    | If_run { body; _ } -> List.iter st body
+    | If_run { wire; n; body; _ } ->
+        (* a run of no samples is no test at all: the RTL would take it, the
+           model would not *)
+        if n < 1 then failwith (Printf.sprintf "if_run %s %d: the run must be at least 1 sample" wire n);
+        List.iter st body
     | If_bit { then_; else_; _ } -> List.iter st then_; List.iter st else_
     | Put _ | Put_not _ | Sample _ | Sample_into _ -> ()
   in
@@ -773,8 +782,15 @@ let add x y = { lo = x.lo + y.lo;
 let exact v = { lo = v; hi = Some v }
 
 (* Instructions since the anchor at each put, over every incoming path. *)
-let put_k evs ~issue =
+let put_k ?(entry = []) evs ~issue =
   let k = Array.make (Array.length evs) None in
+  (* from the program start (anchor 0 at tick 0): instruction j runs at tick
+     j, so a put at the end of a g-instruction prefix is g - 1 after it *)
+  List.iter
+    (fun (s, g) ->
+      let g = if issue = None then 0 else g - 1 in
+      k.(s) <- Some (match k.(s) with None -> (g, g) | Some (a, b) -> (min a g, max b g)))
+    entry;
   let anchor e = match e.kind with KPut -> false | _ -> true in
   Array.iteri
     (fun v ev ->
@@ -806,8 +822,8 @@ let event_time ev anchor (klo, khi) =
   | KTimer t -> (add anchor { lo = max klo t; hi = Some (max khi t) }, true)
 
 let certify ?(io = ideal_io) ?issue prog assignment =
-  let evs = schedule ~io prog assignment in
-  let pk = put_k evs ~issue in
+  let evs, entry = schedule_entry ~io prog assignment in
+  let pk = put_k ~entry evs ~issue in
   List.map
     (fun c ->
       let pairs = Hashtbl.create 16 and peer = ref false in
@@ -863,7 +879,7 @@ let reaction_hazards ?(io = ideal_io) ?(issue = 1) prog assignment =
   (* from the start: instruction j runs at tick j, so the event at the end of
      a g-instruction prefix is reached at tick g - 1 (anchor 0) *)
   List.iter (fun (s, g) -> worst.(s) <- max worst.(s) (g - 1)) entry;
-  let pk = put_k evs ~issue:(Some 1) in
+  let pk = put_k ~entry evs ~issue:(Some 1) in
   Array.iteri
     (fun v ev ->
       let base = match ev.kind with KPut -> snd pk.(v) | _ -> 0 in
