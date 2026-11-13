@@ -35,6 +35,20 @@ jobs:
           rm -f tt_vectors/cfg.hex tt_vectors/usb_token/cfg.hex
           find tt_vectors -type f | sort
 
+      # RTL-vs-netlist pin cases for tt-relwire's gl_pins job
+      - name: Collect the pin-level netlist cases
+        run: |
+          tapeout/collect_gl_cases.sh tt_vectors/gl_pins
+          cp hw/gl/tb_pins.v hw/gl/run_gl.sh tt_vectors/gl_pins/
+
+      # the demo-board library: the committed image is what relwirec emits, and
+      # the stream relwire_tt.py builds is byte for byte the cocotb stream
+      - name: Host library against the toolchain
+        run: |
+          dune exec relwirec -- examples/i2c_ns.rw --tick-ns 1000 --emit-image /tmp/i2c_image.py
+          diff /tmp/i2c_image.py host/i2c_image.py
+          python3 host/test_host.py host/i2c_image.py tt_vectors
+
       - name: Upload test vectors
         uses: actions/upload-artifact@v7
         with:

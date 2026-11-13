@@ -1,0 +1,65 @@
+# PS/2, host to device: the host sends a command byte (here Set LEDs, 0xED).
+# The host inhibits the clock for at least 100 us, pulls data low (the start
+# bit, a request to send) and lets the clock go. From then on the device makes
+# the clock: the host changes data while the clock is low and the device
+# samples on the rising edge. After the stop bit the device acknowledges by
+# holding data low for one more clock.
+#
+# The ownership moves mid-frame: the host owns the request edges and the data
+# bits, the device owns every clock edge after the request and the ACK. Nothing
+# in the program says "now the device drives the clock"; each edge says whose
+# time it is. Parity is the checksum register at degree 1, as in ps2.rw.
+#
+# With no device on the wire, the first clock edge is a device-owned time that
+# never comes: the host reports a missed deadline.
+
+const half      = 40us    # 12.5 kHz device clock
+const t_inhibit = 100us   # host holds the clock low at least this long
+const t_start   = 10ms    # the device must start clocking within this
+
+wire CLK  dominant_low pull_up
+wire DATA dominant_low pull_up
+
+field cmd[8]   from host
+crc   par[1] poly 1 from host   # x + 1: a running XOR
+lit   idle  = 1 from host
+lit   start = 0 from host
+lit   stop  = 1 from host
+lit   ack   = 0 from device
+lit   done  = 1 from device
+time  inhibit, req, release from host
+time  first, fall, rise from device
+
+# one device clock pulse carrying a host bit
+macro cell(f, i) {
+  edge   CLK -> 0 @fall in [half, inf]
+  put    DATA f[i]                    # the host changes data while the clock is low
+  edge   CLK -> 1 @rise in [half, inf]
+  sample DATA f[i]                    # the device samples on the rising edge
+}
+
+protocol {
+  sample DATA idle[0] into par        # start the parity at 1: odd parity
+  edge   CLK  -> 0 @inhibit in [half, inf]
+  edge   DATA -> 0 @req     in [t_inhibit, inf]
+  edge   CLK  -> 1 @release in [half, inf]
+  # the start bit: the first clock pulse is the device's, and it may never come
+  edge   CLK -> 0 @first in [half, t_start]
+  put    DATA start[0]
+  edge   CLK -> 1 @rise in [half, inf]
+  sample DATA start[0]
+  repeat i 8 {
+    edge   CLK -> 0 @fall in [half, inf]
+    put    DATA cmd[i]
+    edge   CLK -> 1 @rise in [half, inf]
+    sample DATA cmd[i] into par
+  }
+  use cell(par, 0)
+  use cell(stop, 0)                   # the host lets data go
+  use cell(ack, 0)                    # the device holds it low for one clock
+  put    DATA done[0]                 # and lets it go
+}
+
+constraint "tINH": inhibit -> req >= t_inhibit
+constraint "tCKL": fall -> rise >= half
+constraint "tCKH": rise -> fall >= half

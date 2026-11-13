@@ -2,13 +2,17 @@
 # Gate-level check: run the same pin stimulus on the RTL and on the hardened
 # netlist, and require identical outputs on every cycle plus identical
 # readback. Usage: run_gl.sh NETLIST CASE_DIR BYTES CYCLES
+# RTL defaults to this repository's sources; set RTL to other paths (as the
+# tt-relwire copy does). PDK_ROOT must hold ihp-sg13cmos5l.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NET=$1 CASE=$2 BYTES=$3 CYCLES=$4
-PDK_ROOT=${PDK_ROOT:-/root/tt/pdk}
+PDK_ROOT=${PDK_ROOT:-$HOME/tt/pdk}
 M=$PDK_ROOT/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/verilog
 OUT=$(mktemp -d)
-iverilog -g2012 -o "$OUT/rtl" "$HERE/tb_pins.v" "$HERE/../rpm_top.v" "$HERE/../rpm_core.v"
+RTL=${RTL:-"$HERE/../rpm_top.v $HERE/../rpm_core.v"}
+# shellcheck disable=SC2086
+iverilog -g2012 -o "$OUT/rtl" "$HERE/tb_pins.v" $RTL
 iverilog -g2012 -DFUNCTIONAL -DUNIT_DELAY=#0 -o "$OUT/gl" "$HERE/tb_pins.v" "$NET" "$M/sg13cmos5l_stdcell.v" "$M/sg13cmos5l_udp.v"
 cp -r "$CASE" "$OUT/rtl_case"; cp -r "$CASE" "$OUT/gl_case"
 vvp -n "$OUT/rtl" +dir="$OUT/rtl_case" +bytes=$BYTES +cycles=$CYCLES > /dev/null
