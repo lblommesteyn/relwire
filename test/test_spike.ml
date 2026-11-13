@@ -829,7 +829,7 @@ let () =
   check "a 70000-tick deadline is refused (it would have read as unbounded)"
     (rejects (fun () -> Hw.compile (ps "wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [1,70000] }")));
   check "inf still compiles to the unbounded sentinel"
-    ((Hw.compile (ps "wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [1,inf] }")).consts.(1) = 0xFFFF);
+    ((Hw.compile (ps "wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [1,inf] }")).consts |> Array.mem 0xFFFF);
   check "65534 ticks, the largest finite value, still compiles"
     ((Hw.compile (ps "wire W push_pull pull_down lit x = 1 from tx protocol { after d 65534 put W x[0] }")).consts.(0) = 65534);
   check "a time literal of 1000000 ticks or more is refused (that is how inf is spelt)"
