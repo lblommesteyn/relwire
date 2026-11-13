@@ -20,7 +20,12 @@ let read_lines path =
   in
   go []
 
-let root = Filename.concat (Filename.get_temp_dir_name ()) "relwire_hw"
+(* RELWIRE_HW_DIR keeps the cases (dune gives a test its own temporary
+   directory, which goes away) for tapeout/collect_gl_cases.sh *)
+let root =
+  match Sys.getenv_opt "RELWIRE_HW_DIR" with
+  | Some d when d <> "" -> d
+  | _ -> Filename.concat (Filename.get_temp_dir_name ()) "relwire_hw"
 let run cmd = if Sys.command cmd <> 0 then failwith ("command failed: " ^ cmd)
 
 let first_diff a b =

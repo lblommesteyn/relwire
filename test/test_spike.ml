@@ -624,7 +624,9 @@ let () =
         List.map
           (fun owner ->
             let c = certify ~issue:1 p (Run_as [ owner ]) in
-            print_certificate ~tick_ns:220 (Printf.sprintf "  %s, role %s" file owner) c;
+            (* print only the constraints this role's times reach *)
+            print_certificate ~tick_ns:220 (Printf.sprintf "  %s, role %s" file owner)
+              (List.filter (fun l -> l.instances > 0) c);
             c)
           owners
       in

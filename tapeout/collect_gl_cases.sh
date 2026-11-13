@@ -9,7 +9,7 @@
 # Usage: collect_gl_cases.sh DEST [SRC]
 set -euo pipefail
 DEST=$1
-SRC=${2:-${TMPDIR:-/tmp}/relwire_hw}
+SRC=${2:-${RELWIRE_HW_DIR:-${TMPDIR:-/tmp}/relwire_hw}}
 SRC=${SRC%/}
 CASES="i2c_arbitration:2000 i2c_read_branch:3000 spi_full_duplex:800 uart:1200
 manchester32:3600 can_crc_arbitration:8000 jtag:1200 onewire_no_device:4000
