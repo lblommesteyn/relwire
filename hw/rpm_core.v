@@ -30,6 +30,11 @@
 //   0 HALT
 // A constant of 0xFFFF as a max means unbounded.
 //
+// A push-pull wire that two cores drive to opposite levels in the same tick
+// has no level (cnow): a SAMPLE or a data edge on it reports a bad wire
+// (code 6) and binds nothing, and no edge to a level is seen on it, as in the
+// reference model's Contention.
+//
 // Checksum: a 16-bit register steps as an LFSR, crc <- x*crc + bit*g(x) mod
 // g(x), on every SAMPLE with [fold] set. g is constant-table entry 7,
 // left-aligned (g(x) * x^(16-n) for degree n, without the x^n term), so the
@@ -54,6 +59,8 @@ module rpm_core #(
     input wire [15:0] tick,
     input wire [NW-1:0] now,
     input wire [NW-1:0] prev,
+    input wire [NW-1:0] cnow,  // per wire: cores drove it both ways (push-pull) this tick
+    input wire [NW-1:0] cprev,
     input wire [2*NW-1:0] res,  // per wire: 0 push-pull, 1 dominant-low, 2 dominant-high
     input wire [25:0] instr,
     input wire [3:0] role_mask,
@@ -120,23 +127,25 @@ module rpm_core #(
   // computed one cycle early into registers: the execute cycle is then a short
   // next-state mux instead of decode, a 16-bit subtract and compares.
   reg [6:0] p_addr;
-  reg p_bus, p_rose, p_dbit, p_ge_a, p_dl, p_run, p_last, p_tne;
+  reg p_bus, p_rose, p_dbit, p_ge_a, p_dl, p_run, p_last, p_tne, p_cf;
   reg [1:0] p_rw;
   // Reset too, although every value is written before it is used: a gate-level
   // netlist must not start from X (RTL simulation would hide it).
   always @(posedge clk or negedge rst_n)
     if (!rst_n) begin
       p_addr <= 0;
-      {p_bus, p_rose, p_dbit, p_ge_a, p_dl, p_run, p_last, p_tne} <= 0;
+      {p_bus, p_rose, p_dbit, p_ge_a, p_dl, p_run, p_last, p_tne, p_cf} <= 0;
       p_rw <= 0;
     end else if (rst) begin
       p_addr <= 0;
-      {p_bus, p_rose, p_dbit, p_ge_a, p_dl, p_run, p_last, p_tne} <= 0;
+      {p_bus, p_rose, p_dbit, p_ge_a, p_dl, p_run, p_last, p_tne, p_cf} <= 0;
       p_rw <= 0;
     end else if (pre_en) begin
       p_addr <= addr;
       p_bus <= bus;
-      p_rose <= rose;
+      // a contended wire has no level: entering or leaving contention is a change
+      p_rose <= rose | (cnow[w] != cprev[w]);
+      p_cf <= cnow[w];
       p_dbit <= dbit;
       p_rw <= rw;
       p_ge_a <= d >= ka;                      // EDGE min, AFTER, TOGGLE nominal/min
@@ -248,16 +257,22 @@ module rpm_core #(
             goto(pc + 1'b1);
           end
           4'd3: begin  // SAMPLE
-            if (run_len[3*w+:3] != 0 && last[w] == p_bus) begin
-              if (run_len[3*w+:3] != 3'd7) run_len[3*w+:3] <= run_len[3*w+:3] + 1'b1;
-            end else run_len[3*w+:3] <= 3'd1;
-            last[w] <= p_bus;
-            if (instr[6]) crc <= {crc[14:0], 1'b0} ^ ((crc[15] ^ p_bus ^ cinv) ? kp : 16'd0);
-            if (sup) begin
-              if ((p_dbit ^ cinv) == p_bus) emit(3'd1, p_addr);
-              else lose;
-            end else if (lit && (p_dbit ^ cinv) != p_bus) emit(3'd7, p_addr);
-            else dmem[p_addr[5:0]] <= p_bus;
+            if (p_cf) emit(3'd6, p_addr);  // contended: no level to check, keep or fold
+            else begin
+              if (run_len[3*w+:3] != 0 && last[w] == p_bus) begin
+                if (run_len[3*w+:3] != 3'd7) run_len[3*w+:3] <= run_len[3*w+:3] + 1'b1;
+              end else run_len[3*w+:3] <= 3'd1;
+              last[w] <= p_bus;
+              if (instr[6]) crc <= {crc[14:0], 1'b0} ^ ((crc[15] ^ p_bus ^ cinv) ? kp : 16'd0);
+              // every role keeps the wire's level of a checksum bit, so a
+              // branch on it goes the same way in every role
+              if (instr[5]) dmem[p_addr[5:0]] <= p_bus;
+              if (sup) begin
+                if ((p_dbit ^ cinv) == p_bus) emit(3'd1, p_addr);
+                else lose;
+              end else if (lit && (p_dbit ^ cinv) != p_bus) emit(3'd7, p_addr);
+              else dmem[p_addr[5:0]] <= p_bus;
+            end
             goto(pc + 1'b1);
           end
           4'd4: begin  // AFTER
@@ -276,7 +291,7 @@ module rpm_core #(
             end else if (phase == DRIVEN) begin
               if (p_tne) begin
                 if (op == 4'd1) begin
-                  if (p_bus == lvl) begin
+                  if (!p_cf && p_bus == lvl) begin
                     emit(3'd1, 7'd0);
                     finish;
                   end else begin
@@ -286,7 +301,8 @@ module rpm_core #(
                 end else begin
                   // a data edge must actually transition: the right level with
                   // no transition is a collision (the symbol never reached the wire)
-                  if (!p_rose) begin  // no transition: collision, adopt nothing
+                  if (p_cf) emit(3'd6, p_addr);  // contended: no symbol, nothing adopted
+                  else if (!p_rose) begin  // no transition: collision, adopt nothing
                     emit(3'd6, p_addr);
                     demoted[role] <= 1'b1;
                     oe <= 0;
@@ -296,11 +312,12 @@ module rpm_core #(
                 end
               end
             end else if (op == 4'd1) begin  // observed / awaiting edge
-              if (p_bus == lvl && p_rose) begin
-                if (!p_ge_a) emit(3'd5, 7'd0);
-                finish;
-              end else if (p_dl) begin
+              // the deadline first: an edge after max is late, not accepted
+              if (p_dl) begin
                 emit(3'd4, 7'd0);
+                finish;
+              end else if (!p_cf && p_bus == lvl && p_rose) begin
+                if (!p_ge_a) emit(3'd5, 7'd0);
                 finish;
               end
             end else begin  // observed toggle: blanked before min, deadline max
@@ -308,7 +325,8 @@ module rpm_core #(
                 emit(3'd4, 7'd0);
                 finish;
               end else if (p_ge_a && p_rose) begin
-                dmem[p_addr[5:0]] <= p_bus;
+                if (p_cf) emit(3'd6, p_addr);
+                else dmem[p_addr[5:0]] <= p_bus;
                 finish;
               end
             end

@@ -806,5 +806,65 @@ let () =
   check "symbol: neither claims an arbitration win or loss" 
     (outcomes m1 Arbitration_lost = [] && outcomes m2 Arbitration_lost = []);
 
+  print_endline "21. audit regressions (independent of model/RTL agreement)";
+  let ps = Rw_parse.program_of_string in
+  let rejects f = match f () with exception (Failure _ | Rw_parse.Parse_error _) -> true | _ -> false in
+  (* a sampled checksum bit is bound in every role, so a branch on it agrees *)
+  let cb = ps "wire W push_pull pull_down crc c[1] poly 1 init 1 from tx lit one = 1 from tx protocol { put W c[0] after gap 5 sample W c[0] if c[0] == 1 { put W one[0] after mark 5 sample W one[0] } }" in
+  let tx = make_agent ~issue:1 ~name:"tx" cb (Run_as [ "tx" ]) ~inputs:[]
+  and ob = make_agent ~issue:1 ~name:"ob" cb Observe_all ~inputs:[] in
+  ignore (simulate ~wires:cb.wires ~agents:[ tx; ob ] ~ticks:40 ());
+  check "a checksum bit's sender and its observer both hold the wire's level"
+    (field_value tx "c" = "1" && field_value ob "c" = "1");
+  check "so a branch on it takes the same path in both: same pc, no mismatch"
+    (tx.pc = ob.pc && done_ tx && outcomes ob Mismatch = [] && outcomes tx Mismatch = []);
+  (* every role's run leaves the same bound bits: the invariant itself *)
+  check "and every bound bit agrees across the two roles"
+    (List.for_all (fun f -> field_value tx f = field_value ob f) [ "c"; "one" ]);
+  check "a branch on a literal is refused (its owner and observers can disagree)"
+    (rejects (fun () -> specialize (ps "wire W push_pull pull_down lit z = 0 from tx protocol { put W z[0] after g 3 sample W z[0] if z[0] == 0 { put W z[0] } }") Observe_all));
+  (* values the table cannot hold are refused, not shortened *)
+  check "a 70000-tick delay is refused by the compiler (was 65535)"
+    (rejects (fun () -> Hw.compile (ps "wire W push_pull pull_down lit x = 1 from tx protocol { after delay 70000 put W x[0] }")));
+  check "a 70000-tick deadline is refused (it would have read as unbounded)"
+    (rejects (fun () -> Hw.compile (ps "wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [1,70000] }")));
+  check "inf still compiles to the unbounded sentinel"
+    ((Hw.compile (ps "wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [1,inf] }")).consts.(1) = 0xFFFF);
+  check "65534 ticks, the largest finite value, still compiles"
+    ((Hw.compile (ps "wire W push_pull pull_down lit x = 1 from tx protocol { after d 65534 put W x[0] }")).consts.(0) = 65534);
+  check "a time literal of 1000000 ticks or more is refused (that is how inf is spelt)"
+    (rejects (fun () -> ps ~tick_ns:1 "const t = 2ms wire W push_pull pull_down lit x = 1 from tx protocol { after d t put W x[0] }"));
+  check "a tick of 0 ns is refused" (rejects (fun () -> ps ~tick_ns:0 "wire W push_pull pull_down lit x = 1 from tx protocol { put W x[0] }"));
+  (* inputs that would alias hardware resources *)
+  check "a fifth wire is refused (the chip has four)"
+    (rejects (fun () -> Hw.compile (ps "wire A push_pull pull_down wire B push_pull pull_down wire C push_pull pull_down wire D push_pull pull_down wire E push_pull pull_down lit x = 1 from tx protocol { put E x[0] }")));
+  check "x[1] of a 1-bit field is refused (it would address the next field)"
+    (rejects (fun () -> Hw.compile (ps "wire W push_pull pull_down field x[1] from tx field y[1] from tx protocol { put W x[1] }")));
+  check "a loop index past the field's width is refused"
+    (rejects (fun () -> Hw.compile (ps "wire W push_pull pull_down field x[2] from tx protocol { repeat i 3 { put W x[i] } }")));
+  check "a name declared twice is refused"
+    (rejects (fun () -> Hw.compile (ps "wire W push_pull pull_down field x[2] from tx field x[1] from tx protocol { put W x[0] }")));
+  check "an empty window [5, 2] is refused"
+    (rejects (fun () -> specialize (ps "wire W push_pull pull_down time t from tx protocol { edge W -> 1 @t in [5,2] }") Observe_all));
+  (* zero-count loops: no body in the model, no LOOP in the binary *)
+  let z = ps "wire W push_pull pull_down lit x = 1 from tx protocol { repeat i 0 { put W x[0] after mark 5 sample W x[0] } }" in
+  check "repeat i 0 compiles to nothing but HALT, and specializes to nothing"
+    ((Hw.compile z).words = [| 0 |] && Array.length (specialize z Observe_all) = 0);
+  (* an edge past its deadline is late, even if it arrives on that tick *)
+  let le = ps "wire W push_pull pull_down time rise from tx protocol { edge W -> 1 @rise in [2,5] }" in
+  let lo = make_agent ~issue:1 ~name:"late" le Observe_all ~inputs:[] in
+  ignore (simulate ~wires:le.wires ~agents:[ lo ] ~raw:[ (fun ~tick -> [ ("W", if tick >= 6 then Strong1 else Strong0) ]) ] ~ticks:10 ());
+  check "an edge at tick 6 for a window [2, 5] is a missed deadline"
+    (List.length (outcomes lo Deadline_missed) = 1 && outcomes lo Early_edge = []);
+  let ok = make_agent ~issue:1 ~name:"ontime" le Observe_all ~inputs:[] in
+  ignore (simulate ~wires:le.wires ~agents:[ ok ] ~raw:[ (fun ~tick -> [ ("W", if tick >= 5 then Strong1 else Strong0) ]) ] ~ticks:10 ());
+  check "and one at tick 5 is on time" (outcomes ok Deadline_missed = [] && done_ ok);
+  (* the instructions before the first timed event count against it *)
+  let hp = ps "wire W push_pull pull_down field x[1] from tx time rise from tx protocol { sample W x[0] sample W x[0] sample W x[0] edge W -> 1 @rise in [1,5] }" in
+  check "three samples before an edge whose window opens at 1: a reaction hazard"
+    (reaction_hazards hp Observe_all <> []);
+  check "and none when the window opens at 3, when the core gets there"
+    (reaction_hazards (ps "wire W push_pull pull_down field x[1] from tx time rise from tx protocol { sample W x[0] sample W x[0] sample W x[0] edge W -> 1 @rise in [3,5] }") Observe_all = []);
+
   if !failures > 0 then (Printf.printf "%d FAILED\n" !failures; exit 1)
   else print_endline "ALL PASS"
