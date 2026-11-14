@@ -14,8 +14,10 @@
    occurrence of [from_] to the next occurrence of [to_], unless another
    [from_] comes first; only pairs where the certified role owns an end.
 
-   Ideal io (no synchronizer or pad delay) under both issue models: unlimited
-   and one instruction per tick. *)
+   Two in three programs get a prefix of puts before their first edge, so
+   the stretch from the program start is covered too. Ideal io (no
+   synchronizer or pad delay) under both issue models: unlimited and one
+   instruction per tick. *)
 open Relwire
 
 let failures = ref 0
@@ -64,7 +66,20 @@ let run_case ~family st seed ~issue =
         (Gen.generate_toggle st, [ At "sof"; At "mid"; At "boundary"; At "end"; Change "LINE" ])
   in
   let constraints = random_constraints st labels in
-  let p = { spec.prog with constraints } in
+  (* Gen programs open with an edge; give two in three a prefix of puts
+     before it (a literal its owner drives: SDA low before the start, or the
+     recessive line level), sometimes inside a loop, so events run before the
+     first anchor and the instructions there count *)
+  let prefix =
+    let put = match family with
+      | `Bus -> Put { wire = "SDA"; field = "lit"; idx = Const 0 }
+      | `Toggle -> Put { wire = "LINE"; field = "sync"; idx = Const 0 } in
+    match Random.State.int st 3 with
+    | 0 -> []
+    | 1 -> List.init (1 + Random.State.int st 3) (fun _ -> put)
+    | _ -> [ Repeat { var = "j"; count = 1 + Random.State.int st 3; body = [ put ] } ]
+  in
+  let p = { spec.prog with constraints; body = prefix @ spec.prog.body } in
   let tag = Printf.sprintf "%s seed %d%s" (match family with `Bus -> "bus" | `Toggle -> "toggle") seed
       (if issue = None then "" else " issue1") in
   let inputs = List.map (fun r -> (r, Gen.random_inputs st spec r)) Gen.roles in
