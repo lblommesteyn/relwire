@@ -253,7 +253,7 @@ module tt_um_relwire #(
       rpm_core #(.NW(NW)) u (
           .clk(clk), .rst_n(rst_ni), .rst(cores_rst), .pre_en(predecoding && pre_core == g),
           .exec_en(executing && exec_core == g),
-          .tick(tick), .now(now), .prev(prev), .cnow(cnow), .cprev(cprev), .res(res), .instr(ireg[26*g+:26]),
+          .tick(tick), .tick_inc(!cores_rst && slot == T - 1), .now(now), .prev(prev), .cnow(cnow), .cprev(cprev), .res(res), .instr(ireg[26*g+:26]),
           .role_mask(masks[4*g+:4]), .pc(pc[g]), .oe(oe[g]), .out(out[g]),
           .ev_valid(ev_valid[g]), .ev_code(ev_code[g]), .ev_addr(ev_addr[g]),
           .halted(halted[g]), .ksel_a(ksa[g]), .ksel_b(ksb[g]), .ka(ka[g]), .kb(kb[g]), .kp(kt[7]),

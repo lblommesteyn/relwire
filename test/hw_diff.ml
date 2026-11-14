@@ -43,7 +43,9 @@ let report what = function
       Printf.printf "      %s differs at line %d: model '%s' vs rtl '%s'\n" what i ref_ hw;
       false
 
-let scenario name prog ~ticks (cores : (assignment * (string * string) list) list) =
+(* [pull]: (wire index, tick) holds that wire low from that tick on, from
+   outside the chip (an external device), in the model and on the pins *)
+let scenario ?pull name prog ~ticks (cores : (assignment * (string * string) list) list) =
   let dir = Filename.concat root name in
   run (Printf.sprintf "mkdir -p %s" dir);
   let mk () =
@@ -54,10 +56,19 @@ let scenario name prog ~ticks (cores : (assignment * (string * string) list) lis
   let fresh = mk () in
   let compiled, nbytes = Hw.write_case dir prog fresh in
   let agents = List.map snd fresh in
-  let tr = simulate ~wires:prog.wires ~agents ~ticks () in
+  let raw =
+    match pull with
+    | None -> []
+    | Some (w, from) ->
+        let name = (List.nth prog.wires w).name in
+        [ (fun ~tick -> if tick >= from then [ (name, Strong0) ] else []) ]
+  in
+  let tr = simulate ~wires:prog.wires ~agents ~raw ~ticks () in
   run
-    (Printf.sprintf "vvp -n %s/sim +dir=%s +ticks=%d +wires=%d +bytes=%d > %s/vvp.log" root dir
-       ticks (List.length prog.wires) nbytes dir);
+    (Printf.sprintf "vvp -n %s/sim +dir=%s +ticks=%d +wires=%d +bytes=%d%s > %s/vvp.log" root dir
+       ticks (List.length prog.wires) nbytes
+       (match pull with Some (w, t) -> Printf.sprintf " +pull_wire=%d +pull_from=%d" w t | None -> "")
+       dir);
   let tr_ok =
     report "bus trace"
       (first_diff (Hw.trace_lines prog tr) (read_lines (Filename.concat dir "trace_hw.txt")))
@@ -196,6 +207,14 @@ let () =
   scenario "shadowed_then_nested"
     (ps "wire W push_pull pull_down field x[2] from tx protocol { repeat i 2 { repeat i 2 { repeat j 2 { put W x[j] after m 5 sample W x[j] } } } }")
     ~ticks:200 [ (Run_as [ "tx" ], [ ("x", "01") ]); (Observe_all, []) ];
+  (* an unbounded wait across the 16-bit tick counter's wrap: the edge comes
+     from outside the chip at tick 65537 and is on time *)
+  scenario "wait_past_wrap" ~pull:(0, 65537)
+    (ps "wire W dominant_low pull_up wire V push_pull pull_down time t from dev lit one = 1 from tx protocol { edge W -> 0 @t in [1, inf] put V one[0] after m 2 sample V one[0] }")
+    ~ticks:65560 [ (Run_as [ "tx" ], []); (Observe_all, []) ];
+  scenario "crc_into_itself"
+    (ps "wire W push_pull pull_down crc c[1] poly 1 init 1 from tx protocol { put W c[0] after g 5 sample W c[0] into c }")
+    ~ticks:30 [ (Run_as [ "tx" ], []); (Observe_all, []) ];
   scenario "push_pull_contention"
     (ps "wire W push_pull pull_down field x[1] from tx protocol { put W x[0] after mark 5 sample W x[0] }")
     ~ticks:30 [ (Run_as [ "tx" ], [ ("x", "0") ]); (Run_as [ "tx" ], [ ("x", "1") ]); (Observe_all, []) ];
