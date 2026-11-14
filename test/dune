@@ -20,3 +20,9 @@
  (modules fuzz)
  (libraries relwire_lib)
  (flags (:standard -warn-error -a)))
+
+(test
+ (name cert_fuzz)
+ (modules cert_fuzz)
+ (libraries relwire_lib)
+ (flags (:standard -warn-error -a)))
