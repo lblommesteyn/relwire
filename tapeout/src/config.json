@@ -34,11 +34,12 @@
   "//": "Cap router threads: full-core detailed routing has crashed WSL on this machine before.",
   "ROUTING_CORES": 8,
 
-  "//": "Slew cleanup: placement-stage repair aims 30% inside the slew/cap limits",
-  "//": "and buffers long wires (post-route repair is left off: it hurt timing).",
+  "//": "Slew cleanup: placement-stage repair aims 30% inside the slew/cap limits and",
+  "//": "buffers wires longer than 200 um (at 400 one weak nor4 net went 6% over the",
+  "//": "slow-corner slew limit once routed; post-route repair did not catch it).",
   "DESIGN_REPAIR_MAX_SLEW_PCT": 30,
   "DESIGN_REPAIR_MAX_CAP_PCT": 30,
-  "DESIGN_REPAIR_MAX_WIRE_LENGTH": 400,
+  "DESIGN_REPAIR_MAX_WIRE_LENGTH": 200,
 
   "//": "Configuration docs: https://librelane.readthedocs.io/en/latest/reference/configuration.html",
 

@@ -15,7 +15,13 @@ module tb_top;
   reg [7:0] cfg[0:NW-1];
   reg [NW-1:0] pins;
   integer w;
-  always @* for (w = 0; w < NW; w = w + 1) pins[w] = uio_oe[w] ? uio_out[w] : cfg[w][4];
+  // [full]: the tick count in 32 bits (the chip's own counter is 16 bits and
+  // wraps); +pull_wire/+pull_from: an external device holds that wire low
+  // from that tick on
+  integer full = 0, pull_wire = -1, pull_from = 0;
+  reg [15:0] last_tick = 0;
+  always @* for (w = 0; w < NW; w = w + 1)
+    pins[w] = (w == pull_wire && full >= pull_from) ? 1'b0 : uio_oe[w] ? uio_out[w] : cfg[w][4];
 
   tt_um_relwire dut (
       .ui_in(ui_in), .uo_out(uo_out), .uio_in({stb, frm, 2'b0, pins}), .uio_out(uio_out),
@@ -40,9 +46,13 @@ module tb_top;
   // seen after the tick counter has advanced.
   always @(posedge clk) begin
     #0.1;
+    if (dut.tick != last_tick) begin
+      full = full + 1;
+      last_tick = dut.tick;
+    end
     if (rst_n && dut.run) begin
-      if (dut.slot == dut.CAPTURE && dut.tick < ticks) begin
-        $fwrite(ft, "%0d ", dut.tick);
+      if (dut.slot == dut.CAPTURE && full < ticks) begin
+        $fwrite(ft, "%0d ", full);
         for (w = 0; w < nwires; w = w + 1)
           if (dut.cnow[w]) $fwrite(ft, "x");  // cores drove it both ways
           else if (!uio_oe[w] && cfg[w][5]) $fwrite(ft, "x");  // undriven, floating
@@ -51,7 +61,7 @@ module tb_top;
       end
       for (c = 0; c < NC; c = c + 1)
         if (dut.ev_valid[c])
-          $fwrite(fe, "%0d %0d %0d %0d\n", c, dut.slot == 0 ? dut.tick - 1 : dut.tick,
+          $fwrite(fe, "%0d %0d %0d %0d\n", c, dut.slot == 0 ? full - 1 : full,
                   dut.ev_code[c], dut.ev_addr[c]);
     end
   end
@@ -62,6 +72,8 @@ module tb_top;
     if (!$value$plusargs("ticks=%d", ticks)) ticks = 1000;
     if (!$value$plusargs("wires=%d", nwires)) nwires = NW;
     if (!$value$plusargs("bytes=%d", nbytes)) nbytes = 0;
+    if (!$value$plusargs("pull_wire=%d", pull_wire)) pull_wire = -1;
+    if (!$value$plusargs("pull_from=%d", pull_from)) pull_from = 0;
     // a missing input would otherwise leave the chip unprogrammed and the
     // wait below hanging
     fd = $fopen({dir, "/load.hex"}, "r");
@@ -85,7 +97,7 @@ module tb_top;
     repeat (4) @(posedge clk);
     for (i = 0; i < nbytes; i = i + 1) send(stream[i]);  // ends with 06 (run)
     fork : run_or_time_out
-      wait (dut.tick == ticks) disable run_or_time_out;
+      wait (full == ticks) disable run_or_time_out;
       begin
         repeat (ticks * dut.T + 1000) @(posedge clk);
         $display("tb_top: tick %0d not reached (is the chip running?)", ticks);
