@@ -57,7 +57,7 @@ memory, over 17 protocol scenarios and randomly generated programs. Timing
 certificates prove, for each program, that every timing constraint holds on
 every path at the chip's real tick. The cocotb tests below run on the RTL and
 on the routed gate-level netlist, and the netlist is also compared with the
-RTL on every output pin on every cycle for twelve programs. Six of the cocotb
+RTL on every output pin on every cycle for thirteen programs. Six of the cocotb
 tests are symmetry checks: renaming the cores, the wires or the role ids must
 rename the result and change nothing else (one swap and one 4-cycle, the
 generators of each group of permutations, tested on the I2C configuration).

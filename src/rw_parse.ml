@@ -32,13 +32,17 @@ let lex src =
       let j = ref (!i + 2) in
       while !j < n && is_hex src.[!j] do incr j done;
       if !j = !i + 2 then raise (Parse_error (!line, "empty hex literal"));
-      push (Int (int_of_string (String.sub src !i (!j - !i))));
+      push (Int (match int_of_string_opt (String.sub src !i (!j - !i)) with
+                 | Some v -> v
+                 | None -> raise (Parse_error (!line, "number too large"))));
       i := !j
     end
     else if is_digit c then begin
       let j = ref !i in
       while !j < n && (is_digit src.[!j] || src.[!j] = '_') do incr j done;
-      push (Int (int_of_string (String.sub src !i (!j - !i))));
+      push (Int (match int_of_string_opt (String.sub src !i (!j - !i)) with
+                 | Some v -> v
+                 | None -> raise (Parse_error (!line, "number too large"))));
       i := !j
     end
     else if c = '"' then begin
@@ -68,6 +72,10 @@ type st = {
   mutable decls : decl list;
   mutable body : stmt list option;
   mutable constraints : constr list;
+  (* round time literals down, not up: while parsing a window's maximum, so a
+     deadline is never later than written *)
+  mutable down : bool;
+  consts_down : (string, int) Hashtbl.t;  (* each constant rounded down *)
 }
 
 let cur st = match st.toks with x :: _ -> x | [] -> { t = Eof; line = 0 }
@@ -98,13 +106,19 @@ let kw st k =
    far below it, so a finite expression can never become unbounded *)
 let arith st op a b =
   if a = Relwire.inf || b = Relwire.inf then err st "inf cannot be used in arithmetic";
-  let big = 1 lsl 40 in
+  let big = Relwire.max_finite in
   if abs a >= big || abs b >= big then err st "number too large";
-  match op with
-  | `Add -> a + b
-  | `Sub -> a - b
-  | `Mul -> a * b
-  | `Div -> if b = 0 then err st "division by zero" else a / b
+  (* operands below 2^40 cannot overflow a sum, and a product is checked
+     before it is formed *)
+  let r =
+    match op with
+    | `Add -> a + b
+    | `Sub -> a - b
+    | `Mul -> if a <> 0 && abs b >= big / abs a then err st "number too large" else a * b
+    | `Div -> if b = 0 then err st "division by zero" else a / b
+  in
+  if abs r >= big then err st "number too large";
+  r
 
 let rec expr st =
   let v = ref (term st) in
@@ -133,12 +147,11 @@ and atom st =
   | Int n -> (
       ignore (next st);
       match unit_ns st n with
-      | Some v ->
-          (v + st.tick_ns - 1) / st.tick_ns
-      | None -> n)
+      | Some v -> if st.down then v / st.tick_ns else (v + st.tick_ns - 1) / st.tick_ns
+      | None -> if n >= Relwire.max_finite then err st "number too large" else n)
   | Id "inf" -> ignore (next st); Relwire.inf
   | Id x -> (
-      match Hashtbl.find_opt st.consts x with
+      match Hashtbl.find_opt (if st.down then st.consts_down else st.consts) x with
       | Some v -> ignore (next st); v
       | None -> err st ("unknown constant " ^ x))
   | Sym "(" -> ignore (next st); let v = expr st in expect st ")"; v
@@ -146,6 +159,7 @@ and atom st =
 
 and unit_ns st n =
   match peek st with
+  | Id ("ns" | "us" | "ms") when n >= Relwire.max_finite -> err st "number too large"
   | Id "ns" -> ignore (next st); Some n
   | Id "us" -> ignore (next st); Some (n * 1000)
   | Id "ms" -> ignore (next st); Some (n * 1_000_000)
@@ -209,7 +223,8 @@ let window st =
   kw st "in"; expect st "[";
   let a = expr st in
   expect st ",";
-  let b = expr st in
+  st.down <- true;
+  let b = Fun.protect ~finally:(fun () -> st.down <- false) (fun () -> expr st) in
   expect st "]"; (a, b)
 
 let rec block st scope =
@@ -345,6 +360,12 @@ let top st =
       let x = ident st in
       expect st "=";
       (match spec_of st with Some v -> Hashtbl.replace st.consts_ns x v | None -> ());
+      (* evaluated twice: rounded up (minimums, delays) and down (maximums) *)
+      let save = st.toks in
+      st.down <- true;
+      let lo = Fun.protect ~finally:(fun () -> st.down <- false) (fun () -> expr st) in
+      st.toks <- save;
+      Hashtbl.replace st.consts_down x lo;
       Hashtbl.replace st.consts x (expr st)
   | Id "wire" ->
       ignore (next st);
@@ -449,6 +470,7 @@ let top st =
 let program_of_string ?(tick_ns = 20) src =
   if tick_ns <= 0 then raise (Parse_error (0, Printf.sprintf "tick of %d ns: it must be positive" tick_ns));
   let st = { toks = lex src; consts = Hashtbl.create 8; consts_ns = Hashtbl.create 8; tick_ns;
+             down = false; consts_down = Hashtbl.create 8;
              macros = Hashtbl.create 8;
              wires = []; decls = []; body = None; constraints = [] } in
   while peek st <> Eof do top st done;
