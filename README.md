@@ -147,6 +147,7 @@ us at 19200 baud, 0.5% slow and inside a UART's tolerance.
 |---|---|
 | semantics | `test/test_spike.ml`: every protocol and rule, record/mutate/replay, timing certificates cross-checked against simulation, eleven named CRCs against their published check values |
 | projections | `test/fuzz.ml`: random well-formed programs (clocked bus with loops, literals, branches, stuffing; Manchester-style data edges), every role plus an observer, both issue models, with and without a second supplier, and every bound bit must agree across roles; 800 runs at 100 seeds in CI, 2,400 at 300 seeds with `dune exec ./test/fuzz.exe 300` |
+| certificates | `test/cert_fuzz.ml`: both random program families, two in three with puts before the first edge, plus 1–6 random constraints between edges, timer marks and puts. Every role is certified and all roles run together under both issue models; each gap measured on the simulated bus must lie inside the certified interval. The measurement is itself checked against the wire (each edge is a real level change, each put shows its level). At 100 seeds in CI: 7,666 measured pairs over 1,896 certificate lines, all inside, 1,070 lines tight. Three planted certificate bugs (drive latency off by one, instruction gaps dropped, the program-start prefix ignored) each fail it. Ideal io only |
 | RTL vs model | `test/hw_diff.ml`: tick for tick on the bus, event for event, bit for bit in data memory; 17 protocol scenarios, 8 audit regressions and random programs, through the pin-level top and its loader |
 | symmetry | `tapeout/test/test.py`: relabelling the cores, the wires or the role ids in the loader stream must relabel the result and change nothing else. Six metamorphic runs, one swap and one 4-cycle per action (the generators of S4), on RTL and on the gate-level netlist. They test each generator on the I2C configuration; they are not a proof for all 13,824 relabellings, which would need the property at every intermediate configuration |
 | reload | `tapeout/test/test.py`: a reload in the middle of a transaction stops the cores, and no core keeps a role from the earlier load |
@@ -265,6 +266,8 @@ Current result, with the audit fixes (CI on [tt-relwire](https://github.com/lblo
   audit (below) found that model/RTL agreement alone can miss a shared bug, so
   the tests now also check invariants of their own: every role holds the same
   bound bits and ends at the same instruction.
+* The certificate fuzz runs with an ideal pin interface; certificates under
+  `--io` are cross-checked against simulation only on the hand-written I2C test.
 * Timing certificates assume an ideal pin interface unless given `--io`
   (synchronizer, output delay, skew, jitter); they are not a guarantee for pad
   delay, pull-up rise time or metastability, none of which has been measured.
