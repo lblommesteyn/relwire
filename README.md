@@ -248,12 +248,12 @@ Current result, with the audit fixes (CI on [tt-relwire](https://github.com/lblo
 |---|---|
 | Tiny Tapeout precheck | passed |
 | gate-level cocotb tests (9: I2C, six symmetry, the CRC-5 token, reload) | passed |
-| netlist vs RTL, every pin every cycle (`gl_pins`, 12 programs) | identical |
+| netlist vs RTL, every pin every cycle (`gl_pins`, 13 programs) | identical |
 | DRC (router, Magic) / LVS | 0 / 0 |
-| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +10.10 ns |
-| setup, typical corner | met, +12.17 ns |
-| hold, fast corner | met, +0.10 ns |
-| utilization | 52% of 1724 x 711 um, 102,476 instances |
+| setup, slow corner 1.08 V / 125 C, 50 MHz | met, +8.18 ns |
+| setup, typical corner | met, +10.97 ns |
+| hold, fast corner | met, +0.11 ns |
+| utilization | 53% of 1724 x 711 um, 103,353 instances |
 | max-slew / max-cap violations | 0 / 0 in every corner |
 | antenna | 0 nets |
 
