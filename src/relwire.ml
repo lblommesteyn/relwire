@@ -350,6 +350,7 @@ type agent = {
   env : (string, level option array) Hashtbl.t;
   hist : (string, level list) Hashtbl.t;  (* samples per wire, newest first *)
   mutable events : event list;
+  mutable trail : (int * int) list;  (* (pc, tick) of each completed instruction, newest first *)
   lits : (string * unit) list;
   clock : float;  (* this agent's tick length relative to nominal *)
   in_sync : int;  (* ticks from bus to what this agent sees *)
@@ -398,7 +399,7 @@ let make_agent ?(clock = 1.0) ?(in_sync = 0) ?(out_delay = 0) ?issue ~name prog 
   { aname = name; machine = specialize prog assignment;
     specs = List.map (fun w -> (w.name, w)) prog.wires;
     pc = 0; phase = Ready; anchor = 0; demoted = [];
-    drives = Hashtbl.create 4; env; hist = Hashtbl.create 4; events = [];
+    drives = Hashtbl.create 4; env; hist = Hashtbl.create 4; events = []; trail = [];
     clock; in_sync; out_delay; issue; crc_def = crc_of prog; crc = fst (crc_cfg prog); crc_inv = snd (crc_cfg prog);
     lits =
       List.filter_map
@@ -575,6 +576,7 @@ let step a ~tick ~now ~prev =
          | (Ready | Awaiting), Observed | Awaiting, Supplied -> await ()));
     (* a completed instruction uses an issue slot *)
     if a.pc <> pc0 then begin
+      a.trail <- (pc0, tick) :: a.trail;
       incr issued;
       match a.issue with Some k when !issued >= k -> continue := false | _ -> ()
     end
